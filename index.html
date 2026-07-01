@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VoxelRT — real-time path-traced voxel GI</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #gfx { width: 100vw; height: 100vh; display: block; cursor: crosshair; }
+    #hud {
+      position: fixed; left: 10px; top: 10px; padding: 6px 10px;
+      color: #cfe3ff; background: rgba(8, 12, 20, 0.55); border-radius: 6px;
+      font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre; pointer-events: none; user-select: none;
+    }
+    #overlay {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      color: #ff9d9d; background: rgba(0, 0, 0, 0.85); padding: 40px;
+      font: 14px/1.6 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gfx"></canvas>
+  <div id="hud">initializing WebGPU…</div>
+  <div id="overlay"></div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

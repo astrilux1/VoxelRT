@@ -1,0 +1,13 @@
+{
+  "name": "voxelrt",
+  "version": "0.1.0",
+  "description": "Real-time path-traced global illumination for 1/16 m voxels, rendered with WebGPU compute shaders",
+  "type": "module",
+  "scripts": {
+    "start": "npx http-server -p 8080 -c-1 .",
+    "test": "node test/screenshot.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
