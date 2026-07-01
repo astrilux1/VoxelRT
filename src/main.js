@@ -161,7 +161,12 @@ async function init() {
   window.addEventListener('resize', () => { resizePending = true; });
 
   // --- Camera + uniforms ---------------------------------------------------
-  const camera = new Camera(canvas, scene.spawn);
+  // Optional camera pose overrides (useful for scripted captures).
+  const spawn = { ...scene.spawn };
+  if (params.has('px')) spawn.pos = [parseFloat(params.get('px')), parseFloat(params.get('py')), parseFloat(params.get('pz'))];
+  if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
+  if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
+  const camera = new Camera(canvas, spawn);
   const uniformData = new ArrayBuffer(256);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
@@ -376,7 +381,7 @@ async function init() {
         Promise.all([device.popErrorScope(), device.popErrorScope()]).then(([oom, val]) => {
           if (oom) fatal(`out-of-memory: ${oom.message}`);
           if (val) fatal(`validation: ${val.message}`);
-        });
+        }).catch(() => { /* device lost; reported via device.lost */ });
       }
 
       lastParity = parity;
