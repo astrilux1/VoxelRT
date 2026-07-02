@@ -148,8 +148,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   initRng(gid.xy, u.params0.x ^ 0x5f356495u);
 
   let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
-  let x1 = u.camPos.xyz + cameraRay(uv) * g.w;
   let n1 = g.xyz;
+  let x1 = receiverPoint(u.camPos.xyz, cameraRay(uv), g.w, n1);
 
   // Reproject into the previous frame.
   let prevClip = u.prevViewProj * vec4<f32>(x1, 1.0);

@@ -100,9 +100,9 @@ fn pairedPartner(pix : vec2<i32>, ti : u32) -> vec2<i32> {
   return pix + d;
 }
 
-fn surfaceAt(q : vec2<i32>, dims : vec2<f32>, t : f32) -> vec3<f32> {
+fn surfaceAt(q : vec2<i32>, dims : vec2<f32>, g : vec4<f32>) -> vec3<f32> {
   let uv = (vec2<f32>(q) + 0.5) / dims;
-  return u.camPos.xyz + cameraRay(uv) * t;
+  return receiverPoint(u.camPos.xyz, cameraRay(uv), g.w, g.xyz);
 }
 
 // Can `s` illuminate the receiver? One shadow ray.
@@ -136,7 +136,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   initRng(gid.xy, u.params0.x ^ 0x2c1b3c6du);
 
-  let x1 = surfaceAt(pix, fdims, g.w);
+  let x1 = surfaceAt(pix, fdims, g);
   let n1 = g.xyz;
   let tPrim = g.w;
   let cosView = max(dot(n1, normalize(u.camPos.xyz - x1)), 0.0);
@@ -197,7 +197,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
       let gq = textureLoad(gbufCur, q, 0);
       if (gq.w <= 0.0) { continue; }
-      let x1q = surfaceAt(q, fdims, gq.w);
+      let x1q = surfaceAt(q, fdims, gq);
 
       // Neighbor compatibility. The baseline test (normal + relative depth)
       // is what generic ReSTIR uses; the plane-exact test additionally

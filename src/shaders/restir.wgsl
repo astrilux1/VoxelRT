@@ -91,6 +91,25 @@ fn lum(c : vec3<f32>) -> f32 {
   return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// Voxel-exact receiver reconstruction. The G-buffer depth is measured along
+// the *jittered* primary ray, so `centerRay * t` lands off the true surface
+// at geometry edges and wobbles frame to frame — which false-fires
+// visibility retests and perturbs reuse targets. Every voxel face lies on an
+// integer grid plane, so intersect the reconstruction ray with the surface
+// plane recovered by rounding the dominant-axis coordinate: exact on-plane,
+// frame-stable. Falls back to the linear reconstruction at grazing angles.
+fn receiverPoint(ro : vec3<f32>, rd : vec3<f32>, t : f32, n1 : vec3<f32>) -> vec3<f32> {
+  let approx = ro + rd * t;
+  let ax = select(select(2u, 1u, abs(n1.y) > 0.5), 0u, abs(n1.x) > 0.5);
+  let ac = select(select(approx.z, approx.y, ax == 1u), approx.x, ax == 0u);
+  let roA = select(select(ro.z, ro.y, ax == 1u), ro.x, ax == 0u);
+  let rdA = select(select(rd.z, rd.y, ax == 1u), rd.x, ax == 0u);
+  if (abs(rdA) < 1e-4) { return approx; }
+  let d = round(ac * INV_VOXEL) * VOXEL_SIZE;
+  let tp = (d - roA) / rdA;
+  return select(approx, ro + rd * tp, tp > 0.0);
+}
+
 // Demodulated integrand of a sample as seen from a receiver surface point
 // (x1, n1), *excluding* visibility: f/albedo * cos1 * L * G. G is the
 // area-measure geometry term for point samples and 1 for directions —
