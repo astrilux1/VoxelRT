@@ -33,7 +33,7 @@ let sunElevation = 0.85;
 const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
-  lightpower: 4096,
+  lightpower: 4096, adaptcand: 16384,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
@@ -67,6 +67,7 @@ const tuning = {
   clamp: parseFloat(params.get('rclampv') || '24'),
   maxhist: parseFloat(params.get('maxhist') || '64'),
   fseed: parseInt(params.get('fseed') || '0', 10),
+  candscale: parseFloat(params.get('candscale') || '1'), // adaptive RIS budget scale
 };
 // Deterministic camera strafe for benchmarking temporal behavior, and an
 // exact frame count to halt at so captures land on a reproducible pose.
@@ -174,7 +175,7 @@ async function init() {
   device.queue.writeBuffer(brickMaskBuf, 0, scene.brickMasks);
 
   const uniformBuf = device.createBuffer({
-    label: 'uniforms', size: 272,
+    label: 'uniforms', size: 288,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -302,7 +303,7 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
-  const uniformData = new ArrayBuffer(272);
+  const uniformData = new ArrayBuffer(288);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
   let prevViewProj = null;
@@ -339,6 +340,7 @@ async function init() {
     u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
     f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
+    f32.set([0, tuning.candscale, 0, 0], 68);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];

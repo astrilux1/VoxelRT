@@ -23,6 +23,8 @@ struct Uniforms {
   params3      : vec4<f32>,   // x = cCap, y = cCapMin, z = dup alpha, w = footprint c
   params4      : vec4<f32>,   // x = spatial sigma/radius (px), y = max accum history,
                               // z = contribution clamp, w = unused
+  params5      : vec4<f32>,   // x = unused, y = adaptive candidate scale
+                              // (?candscale=), z = unused, w = unused
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -41,6 +43,7 @@ const RF_RESCUE    : u32 = 512u;   // ours: disocclusion history rescue (3x3 sea
 const RF_FULLV     : u32 = 1024u;  // ours: revalidate canonical visibility when shading
 const RF_CLAMP     : u32 = 2048u;  // ours: reservoir contribution clamp
 const RF_LIGHTPOWER: u32 = 4096u;  // ours: power-sampled emissive light list
+const RF_ADAPTCAND : u32 = 16384u; // ours: adaptive emissive-NEE RIS candidate budget
 
 fn rflag(bit : u32) -> bool { return (u.params2.x & bit) != 0u; }
 
