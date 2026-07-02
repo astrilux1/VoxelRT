@@ -1,18 +1,129 @@
 // ---------------------------------------------------------------------------
-// pathtrace.wgsl — one path per pixel per frame.
-// Outputs albedo-demodulated radiance (so the denoiser only ever blurs
-// illumination, never voxel texture), plus a G-buffer used for temporal
-// reprojection and edge-aware filtering.
+// pathtrace.wgsl — primary visibility + initial reservoir candidates.
+//
+// Baseline mode (RF_RESTIR off): the original 1-spp path tracer, radiance
+// written directly (albedo-demodulated).
+//
+// ReSTIR mode: one *path tree* per pixel (Lin 2026 §6.1) produces up to three
+// initial candidates for the pixel's unified reservoir:
+//   1. a sun-cone NEE sample at the primary hit          (direct light)
+//   2. a light-list NEE sample at the primary hit, itself picked by RIS
+//      over several emissive voxel faces                 (direct light)
+//   3. a BSDF bounce path whose reconnection vertex x2 carries the full
+//      outgoing radiance estimated by continuing the path (indirect light)
+// Initial RIS selects one; temporal/spatial passes then reuse it. Radiance
+// that never flows through the reservoir (primary-hit emission, sky, and —
+// when unification is disabled — analytic sun NEE) goes to `directOut`.
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(3) var radianceOut : texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var albedoOut   : texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var gbufOut     : texture_storage_2d<rgba32float, write>;
+// Emissive voxel faces: x = coords/face (x|y<<9|z<<18|face<<27), y = material.
+@group(0) @binding(6) var<storage, read> lights : array<vec2<u32>>;
+@group(0) @binding(7) var<storage, read_write> reservoirsA : array<Reservoir>;
+@group(0) @binding(8) var directOut   : texture_storage_2d<rgba16float, write>;
+
+const FIREFLY_CLAMP : f32 = 48.0;
+
+struct LightPoint {
+  pos  : vec3<f32>,   // world position on the face
+  n    : vec3<f32>,   // face normal
+  Le   : vec3<f32>,   // emitted radiance
+  pdfA : f32,         // area-measure pdf
+};
+
+fn sampleLightFace() -> LightPoint {
+  var lp : LightPoint;
+  let count = u.params2.y;
+  let li = min(u32(rand() * f32(count)), count - 1u);
+  let l = lights[li];
+  let v = vec3<f32>(f32(l.x & 0x1ffu), f32((l.x >> 9u) & 0x1ffu), f32((l.x >> 18u) & 0x1ffu));
+  let face = (l.x >> 27u) & 7u;
+  let axis = face >> 1u;
+  let pos = select(0.0, 1.0, (face & 1u) == 0u);   // +side faces sit at v+1
+  var q = v + vec3<f32>(rand(), rand(), rand());   // jitter; axis coord replaced
+  var n = vec3<f32>(0.0);
+  if (axis == 0u)      { q.x = v.x + pos; n.x = select(-1.0, 1.0, pos > 0.5); }
+  else if (axis == 1u) { q.y = v.y + pos; n.y = select(-1.0, 1.0, pos > 0.5); }
+  else                 { q.z = v.z + pos; n.z = select(-1.0, 1.0, pos > 0.5); }
+  let mat = unpackMaterial(l.y);
+  lp.pos = q * VOXEL_SIZE;
+  lp.n = n;
+  lp.Le = mat.albedo * (mat.emissive * EMISSIVE_SCALE);
+  lp.pdfA = 1.0 / (f32(count) * VOXEL_SIZE * VOXEL_SIZE);
+  return lp;
+}
+
+// Direct emissive light at a path vertex via one light-list sample
+// (full, non-demodulated contribution; used at secondary vertices).
+fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>) -> vec3<f32> {
+  if (u.params2.y == 0u) { return vec3<f32>(0.0); }
+  let lp = sampleLightFace();
+  let d = lp.pos - pos;
+  let r2 = max(dot(d, d), 1e-6);
+  let dir = d * inverseSqrt(r2);
+  let cos1 = dot(n, dir);
+  let cos2 = dot(lp.n, -dir);
+  if (cos1 <= 0.0 || cos2 <= 0.0) { return vec3<f32>(0.0); }
+  let r = sqrt(r2);
+  if (traceShadow(pos + n * 1e-3, dir, r - 2e-3)) { return vec3<f32>(0.0); }
+  return albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
+}
+
+// Outgoing radiance Lo(x2 -> x1) estimated by continuing the path from x2.
+// With unification on, emission on BSDF hits is dropped everywhere (covered
+// by light-list NEE at the previous vertex); with it off, emission rides on
+// hits and there is no light-list NEE — matching the baseline estimator.
+fn estimateLo(x2 : vec3<f32>, n2In : vec3<f32>, mat2 : Material, unified : bool) -> vec3<f32> {
+  var Lo = vec3<f32>(0.0);
+  var tp = vec3<f32>(1.0);
+  var pos = x2;
+  var n = n2In;
+  var mat = mat2;
+  let nBounces = u.params0.y;
+
+  for (var v = 1u; v <= nBounces; v++) {
+    if (!unified && mat.emissive > 0.0 && v > 1u) {
+      Lo += tp * mat.albedo * (mat.emissive * EMISSIVE_SCALE);
+    }
+    let surf = pos + n * 1e-3;
+
+    let l = sampleSunDir();
+    let ndl = dot(n, l);
+    if (ndl > 0.0 && l.y > 0.0 && !traceShadow(surf, l, 1e4)) {
+      Lo += tp * mat.albedo * INV_PI * ndl * u.sunRadiance.rgb;
+    }
+    if (unified) {
+      Lo += tp * emissiveNEE(pos, n, mat.albedo);
+    }
+    if (v == nBounces) { break; }
+
+    let rd = cosineHemisphere(n);
+    tp *= mat.albedo;
+    if (v >= 2u) {
+      let p = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 0.95);
+      if (rand() > p) { break; }
+      tp /= p;
+    }
+    let h = trace(surf, rd, 1e4);
+    if (h.t < 0.0) {
+      Lo += tp * skyColor(rd, false);
+      break;
+    }
+    pos = surf + rd * h.t;
+    n = h.n;
+    mat = unpackMaterial(h.mat);
+  }
+  return min(Lo, vec3<f32>(FIREFLY_CLAMP));
+}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let dims = vec2<u32>(u32(u.params1.x), u32(u.params1.y));
   if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+  let pix = vec2<i32>(gid.xy);
+  let pixIdx = gid.y * dims.x + gid.x;
 
   initRng(gid.xy, u.params0.x);
 
@@ -23,70 +134,188 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   var ro = u.camPos.xyz;
   var rd = cameraRay(uv);
 
-  var radiance = vec3<f32>(0.0);
-  var throughput = vec3<f32>(1.0);
+  let restir = rflag(RF_RESTIR);
+  let h0 = trace(ro, rd, 1e4);
 
-  var primT = -1.0;
-  var primN = vec3<f32>(0.0);
-  var primAlbedo = vec3<f32>(1.0);
+  if (h0.t < 0.0) {
+    // Sky: analytic, nearly noise-free; bypasses the reservoir entirely.
+    let sky = skyColor(rd, true);
+    textureStore(radianceOut, pix, vec4<f32>(sky, 1.0));
+    textureStore(directOut, pix, vec4<f32>(sky, 1.0));
+    textureStore(albedoOut, pix, vec4<f32>(1.0));
+    textureStore(gbufOut, pix, vec4<f32>(-rd, -1.0));
+    if (restir) { reservoirsA[pixIdx] = emptyReservoir(); }
+    return;
+  }
 
-  let nBounces = u.params0.y;
+  let mat1 = unpackMaterial(h0.mat);
+  let x1 = ro + rd * h0.t;
+  let n1 = h0.n;
+  let surf1 = x1 + n1 * max(1e-3, h0.t * 1e-4);
 
-  for (var bounce = 0u; bounce <= nBounces; bounce++) {
-    let h = trace(ro, rd, 1e4);
+  textureStore(albedoOut, pix, vec4<f32>(sqrt(mat1.albedo), 1.0));
+  textureStore(gbufOut, pix, vec4<f32>(n1, h0.t));
 
-    if (h.t < 0.0) {
-      // Sun disc only on the primary ray: secondary sun light is handled by
-      // next-event estimation below, so including it here would double count.
-      radiance += throughput * skyColor(rd, bounce == 0u);
-      break;
-    }
+  if (!restir) {
+    // ------------------------------------------------------------------
+    // Baseline: original 1-spp multi-bounce path tracer.
+    // ------------------------------------------------------------------
+    var radiance = vec3<f32>(0.0);
+    var throughput = vec3<f32>(1.0);
+    var pos = x1;
+    var n = n1;
+    var mat = mat1;
+    let nBounces = u.params0.y;
 
-    let mat = unpackMaterial(h.mat);
-    let pos = ro + rd * h.t;
-
-    if (bounce == 0u) {
-      primT = h.t;
-      primN = h.n;
-      primAlbedo = mat.albedo;
-    }
-
-    if (mat.emissive > 0.0) {
-      radiance += throughput * mat.albedo * (mat.emissive * EMISSIVE_SCALE);
-    }
-
-    let surf = pos + h.n * max(1e-3, h.t * 1e-4);
-
-    // Next-event estimation toward the sun cone.
-    let l = sampleSunDir();
-    let ndl = dot(h.n, l);
-    if (ndl > 0.0 && l.y > 0.0) {
-      if (!traceShadow(surf, l, 1e4)) {
+    for (var bounce = 0u; bounce <= nBounces; bounce++) {
+      if (mat.emissive > 0.0) {
+        radiance += throughput * mat.albedo * (mat.emissive * EMISSIVE_SCALE);
+      }
+      let surf = pos + n * 1e-3;
+      let l = sampleSunDir();
+      let ndl = dot(n, l);
+      if (ndl > 0.0 && l.y > 0.0 && !traceShadow(surf, l, 1e4)) {
         radiance += throughput * mat.albedo * INV_PI * ndl * u.sunRadiance.rgb;
       }
+      if (bounce == nBounces) { break; }
+
+      rd = cosineHemisphere(n);
+      throughput *= mat.albedo;
+      if (bounce >= 2u) {
+        let p = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 0.95);
+        if (rand() > p) { break; }
+        throughput /= p;
+      }
+      let h = trace(surf, rd, 1e4);
+      if (h.t < 0.0) {
+        radiance += throughput * skyColor(rd, false);
+        break;
+      }
+      pos = surf + rd * h.t;
+      n = h.n;
+      mat = unpackMaterial(h.mat);
     }
 
-    if (bounce == nBounces) { break; }
+    radiance = min(radiance, vec3<f32>(FIREFLY_CLAMP));
+    let demod = radiance / max(mat1.albedo, vec3<f32>(1e-3));
+    textureStore(radianceOut, pix, vec4<f32>(demod, 1.0));
+    return;
+  }
 
-    // Cosine-weighted diffuse bounce: BRDF * cos / pdf collapses to albedo.
-    rd = cosineHemisphere(h.n);
-    ro = surf;
-    throughput *= mat.albedo;
+  // --------------------------------------------------------------------
+  // ReSTIR initial sampling: build the candidate set, RIS-select one.
+  // --------------------------------------------------------------------
+  let unified = rflag(RF_UNIFIED);
 
-    // Russian roulette after the second bounce.
-    if (bounce >= 2u) {
-      let p = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 0.95);
-      if (rand() > p) { break; }
-      throughput /= p;
+  // Radiance that bypasses the reservoir (demodulated).
+  var direct = vec3<f32>(mat1.emissive * EMISSIVE_SCALE);
+
+  var wSum = 0.0;
+  var sel : Sample;
+  sel.kind = SK_NONE;
+  var selP = 0.0;
+
+  // Candidate: sun cone NEE at x1.
+  {
+    let l = sampleSunDir();
+    let ndl = dot(n1, l);
+    if (ndl > 0.0 && l.y > 0.0 && !traceShadow(surf1, l, 1e4)) {
+      if (unified) {
+        let coneSA = 2.0 * PI * (1.0 - u.sunDir.w);
+        var s : Sample;
+        s.kind = SK_DIR;
+        s.pos = l;
+        s.rad = u.sunRadiance.rgb / max(coneSA, 1e-5);
+        let p = evalTarget(s, x1, n1);
+        let w = p * coneSA;                       // W = 1/pdf = cone solid angle
+        if (w > 0.0) {
+          wSum += w;
+          if (rand() * wSum < w) { sel = s; selP = p; }
+        }
+      } else {
+        direct += INV_PI * ndl * u.sunRadiance.rgb;
+      }
     }
   }
 
-  // Clamp fireflies so single hot samples don't poison the history buffer.
-  radiance = min(radiance, vec3<f32>(48.0));
+  // Candidate: light-list NEE at x1, RIS over 4 emissive faces (§6.1).
+  if (unified && u.params2.y > 0u) {
+    var eSum = 0.0;
+    var eSel : Sample;
+    eSel.kind = SK_NONE;
+    var eSelP = 0.0;
+    var eSelPdf = 1.0;
+    for (var k = 0u; k < 4u; k++) {
+      let lp = sampleLightFace();
+      var s : Sample;
+      s.kind = SK_POINT;
+      s.pos = lp.pos;
+      s.n = lp.n;
+      s.rad = lp.Le;
+      let p = evalTarget(s, x1, n1);
+      let w = p / (4.0 * lp.pdfA);
+      if (w > 0.0) {
+        eSum += w;
+        if (rand() * eSum < w) { eSel = s; eSelP = p; }
+      }
+    }
+    if (eSel.kind != SK_NONE && eSelP > 0.0) {
+      let d = eSel.pos - x1;
+      let r = length(d);
+      if (!traceShadow(surf1, d / r, r - 2e-3)) {
+        let We = eSum / eSelP;                    // RIS contribution weight
+        let w = eSelP * We;                       // = eSum, folded for clarity
+        wSum += w;
+        if (rand() * wSum < w) { sel = eSel; selP = eSelP; }
+      }
+    }
+  }
 
-  let demod = radiance / max(primAlbedo, vec3<f32>(1e-3));
+  // Candidate: BSDF bounce path — reconnection vertex x2 carries Lo.
+  if (u.params0.y > 0u) {
+    let brd = cosineHemisphere(n1);
+    let h = trace(surf1, brd, 1e4);
+    var s : Sample;
+    var W = 0.0;
+    if (h.t < 0.0) {
+      s.kind = SK_DIR;
+      s.pos = brd;
+      s.rad = skyColor(brd, false);
+      let cos1 = max(dot(n1, brd), 1e-4);
+      W = PI / cos1;                              // 1/pdf_omega
+    } else {
+      let x2 = surf1 + brd * h.t;
+      let mat2 = unpackMaterial(h.mat);
+      var Lo = estimateLo(x2, h.n, mat2, unified);
+      if (!unified && mat2.emissive > 0.0) {
+        Lo += mat2.albedo * (mat2.emissive * EMISSIVE_SCALE);
+      }
+      s.kind = SK_POINT;
+      s.pos = x2;
+      s.n = h.n;
+      s.rad = min(Lo, vec3<f32>(FIREFLY_CLAMP));
+      let d = x2 - x1;
+      let r2 = max(dot(d, d), 1e-6);
+      let cos1 = max(dot(n1, normalize(d)), 1e-4);
+      let cos2 = max(dot(h.n, -normalize(d)), 1e-4);
+      W = PI / cos1 * r2 / cos2;                  // 1/pdf in area measure
+    }
+    let p = evalTarget(s, x1, n1);
+    let w = p * W;
+    if (w > 0.0) {
+      wSum += w;
+      if (rand() * wSum < w) { sel = s; selP = p; }
+    }
+  }
 
-  textureStore(radianceOut, vec2<i32>(gid.xy), vec4<f32>(demod, 1.0));
-  textureStore(albedoOut, vec2<i32>(gid.xy), vec4<f32>(sqrt(primAlbedo), 1.0));
-  textureStore(gbufOut, vec2<i32>(gid.xy), vec4<f32>(primN, primT));
+  var out : Sample;
+  out.kind = SK_NONE;
+  if (sel.kind != SK_NONE && selP > 0.0) {
+    out = sel;
+    out.W = wSum / selP;
+    out.c = 1.0;
+    out.seed = pcgHash(pixIdx + u.params0.x * (dims.x * dims.y + 1u));
+  }
+  reservoirsA[pixIdx] = packReservoir(out);
+  textureStore(directOut, pix, vec4<f32>(direct, 1.0));
 }

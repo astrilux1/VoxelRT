@@ -1,14 +1,21 @@
 import { Camera } from './camera.js';
 import { generateScene, VOXEL_SIZE, BRICK } from './scene.js';
 import { normalize3 } from './math.js';
+import { makePairingBuffer } from './pairing.js';
 
 // ---------------------------------------------------------------------------
-// Real-time path-traced global illumination for a 1/16 m voxel world.
-// Pipeline per frame (all WGSL compute except the final blit):
-//   1. pathtrace  — 1 spp, multi-bounce GI + sun NEE, demodulated output
-//   2. temporal   — camera reprojection + exponential history accumulation
-//   3. atrous ×3  — edge-aware wavelet denoise, relaxing as history grows
-//   4. present    — remodulate albedo, expose, ACES tonemap
+// Real-time path-traced global illumination for a 1/16 m voxel world,
+// sampled through a unified ReSTIR reservoir pipeline (after Lin et al. 2026,
+// "ReSTIR PT Enhanced"). Passes per frame (all WGSL compute except the blit):
+//   1. pathtrace      — primary hit + initial reservoir candidates (sun NEE,
+//                       emissive light-list NEE, BSDF bounce path)
+//   2. reuse_temporal — reprojected reservoir merge, duplication-adaptive cCap
+//   3. reuse_spatial  — paired Gaussian reuse + vector-weight shading
+//   4. dupmap         — sample duplication map for next frame's cCap
+//   5. temporal       — camera-reprojected exponential history accumulation
+//   6. atrous ×3      — edge-aware wavelet denoise, relaxing as history grows
+//   7. present        — remodulate albedo, expose, ACES tonemap
+// Every ReSTIR feature is flag-gated for benchmarking (?preset=..., below).
 // ---------------------------------------------------------------------------
 
 const params = new URLSearchParams(location.search);
@@ -21,6 +28,49 @@ let temporalOn = params.get('temporal') !== '0';
 let sunAnimate = false;
 let sunAzimuth = 0.9;
 let sunElevation = 0.85;
+
+// --- ReSTIR configuration (flag bits mirror common.wgsl) --------------------
+const RF = {
+  restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
+  vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
+};
+const PRESETS = {
+  // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
+  base: [],
+  // ReSTIR GI-style: reservoirs for indirect only, random-disk spatial reuse.
+  gi: ['restir', 'treuse', 'sreuse'],
+  // Faithful adaptation of the Lin 2026 technique set.
+  lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+        'vector', 'unified'],
+  // Ours: Lin 2026 + voxel-exact plane reuse, disocclusion rescue,
+  // per-candidate visibility, reservoir contribution clamp.
+  ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+         'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp'],
+};
+const preset = params.get('preset') || 'ours';
+let restirFlags = (PRESETS[preset] || PRESETS.ours)
+  .reduce((m, k) => m | RF[k], 0);
+for (const k of Object.keys(RF)) {          // per-flag URL overrides
+  const v = params.get(k);
+  if (v === '1') restirFlags |= RF[k];
+  if (v === '0') restirFlags &= ~RF[k];
+}
+const tuning = {
+  taps: parseInt(params.get('taps') || '3', 10),
+  sigma: parseFloat(params.get('sigma') || '16'),      // pairing texture σ (px)
+  radius: parseFloat(params.get('radius') || '30'),    // random-disk radius (px)
+  ccap: parseFloat(params.get('ccap') || '20'),
+  capmin: parseFloat(params.get('capmin') || '1'),
+  dupalpha: parseFloat(params.get('dupalpha') || '0.1'),
+  fpc: parseFloat(params.get('fpc') || '0.0008'),
+  clamp: parseFloat(params.get('rclampv') || '24'),
+  maxhist: parseFloat(params.get('maxhist') || '64'),
+  fseed: parseInt(params.get('fseed') || '0', 10),
+};
+// Deterministic camera strafe for benchmarking temporal behavior, and an
+// exact frame count to halt at so captures land on a reproducible pose.
+const benchMove = parseFloat(params.get('benchmove') || '0');
+const stopAt = parseInt(params.get('stopat') || '0', 10);
 
 const status = { frames: 0, ready: false, error: null };
 window.__voxelrt = status;
@@ -90,9 +140,24 @@ async function init() {
   device.queue.writeBuffer(brickBuf, 0, scene.bricks);
 
   const uniformBuf = device.createBuffer({
-    label: 'uniforms', size: 256,
+    label: 'uniforms', size: 272,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+
+  // Emissive-face light list (unified DI+GI candidates).
+  const lightBuf = device.createBuffer({
+    label: 'lights', size: scene.lights.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(lightBuf, 0, scene.lights);
+
+  // Self-inverting Gaussian pairing textures for paired spatial reuse.
+  const pairingData = makePairingBuffer(Math.max(0.8, tuning.sigma));
+  const pairingBuf = device.createBuffer({
+    label: 'pairing', size: pairingData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(pairingBuf, 0, pairingData);
 
   // Per-iteration step size for the à-trous passes.
   const atrousParamBufs = [1, 2, 4].map((step) => {
@@ -105,16 +170,30 @@ async function init() {
   const constants =
     `const GRID : i32 = ${GRID};\nconst BRICK : i32 = ${BRICK};\nconst VOXEL_SIZE : f32 = ${VOXEL_SIZE};\n`;
   const common = constants + (await loadShader('common.wgsl'));
+  const restirLib = await loadShader('restir.wgsl');
   const voxelLib = await loadShader('voxel.wgsl');
-  const [ptModule, tModule, aModule, prModule] = await Promise.all([
-    makeModule(device, 'pathtrace', common + voxelLib + (await loadShader('pathtrace.wgsl'))),
-    makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))),
-    makeModule(device, 'atrous', common + (await loadShader('atrous.wgsl'))),
-    makeModule(device, 'present', await loadShader('present.wgsl')),
-  ]);
+  const [ptModule, trModule, spModule, dupModule, tModule, aModule, prModule] =
+    await Promise.all([
+      makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))),
+      makeModule(device, 'reuse_temporal', common + restirLib + (await loadShader('reuse_temporal.wgsl'))),
+      makeModule(device, 'reuse_spatial', common + restirLib + voxelLib + (await loadShader('reuse_spatial.wgsl'))),
+      makeModule(device, 'dupmap', common + restirLib + (await loadShader('dupmap.wgsl'))),
+      makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))),
+      makeModule(device, 'atrous', common + (await loadShader('atrous.wgsl'))),
+      makeModule(device, 'present', await loadShader('present.wgsl')),
+    ]);
 
   const ptPipeline = device.createComputePipeline({
     label: 'pathtrace', layout: 'auto', compute: { module: ptModule, entryPoint: 'main' },
+  });
+  const trPipeline = device.createComputePipeline({
+    label: 'reuse_temporal', layout: 'auto', compute: { module: trModule, entryPoint: 'main' },
+  });
+  const spPipeline = device.createComputePipeline({
+    label: 'reuse_spatial', layout: 'auto', compute: { module: spModule, entryPoint: 'main' },
+  });
+  const dupPipeline = device.createComputePipeline({
+    label: 'dupmap', layout: 'auto', compute: { module: dupModule, entryPoint: 'main' },
   });
   const tPipeline = device.createComputePipeline({
     label: 'temporal', layout: 'auto', compute: { module: tModule, entryPoint: 'main' },
@@ -133,6 +212,7 @@ async function init() {
 
   // --- Size-dependent resources -------------------------------------------
   let tex = null;
+  let reservoirBufA = null, reservoirBufB = null;
   let rw = 0, rh = 0;
 
   function makeTex(label, format) {
@@ -150,11 +230,23 @@ async function init() {
     rh = Math.max(8, Math.floor(canvas.height * renderScale));
     tex = {
       radiance: makeTex('radiance', 'rgba16float'),
+      direct: makeTex('direct', 'rgba16float'),
+      dup: makeTex('dup', 'r32float'),
       albedo: makeTex('albedo', 'rgba8unorm'),
       gbuf: [makeTex('gbufA', 'rgba32float'), makeTex('gbufB', 'rgba32float')],
       accum: [makeTex('accumA', 'rgba16float'), makeTex('accumB', 'rgba16float')],
       denoise: [makeTex('denoiseA', 'rgba16float'), makeTex('denoiseB', 'rgba16float')],
     };
+    // Reservoirs: 32 bytes per pixel; A = working set (initial + temporal),
+    // B = post-spatial output, read back as next frame's temporal history.
+    // WebGPU zero-initializes buffers, so a fresh B decodes as "no sample".
+    for (const b of [reservoirBufA, reservoirBufB]) if (b) b.destroy();
+    reservoirBufA = device.createBuffer({
+      label: 'reservoirA', size: rw * rh * 32, usage: GPUBufferUsage.STORAGE,
+    });
+    reservoirBufB = device.createBuffer({
+      label: 'reservoirB', size: rw * rh * 32, usage: GPUBufferUsage.STORAGE,
+    });
   }
   recreateTargets();
   let resizePending = false;
@@ -167,7 +259,7 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
-  const uniformData = new ArrayBuffer(256);
+  const uniformData = new ArrayBuffer(272);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
   let prevViewProj = null;
@@ -188,8 +280,11 @@ async function init() {
     f32.set([...prevCamPos, 0], 36);
     f32.set([...sunDir, Math.cos(0.03)], 40);          // ~1.7° angular radius
     f32.set([5.0, 4.5, 3.8, 1.0], 44);                 // sun irradiance, sky intensity
-    u32.set([frame, bounces, temporalOn ? 1 : 0, 0], 48);
+    u32.set([frame + tuning.fseed, bounces, temporalOn ? 1 : 0, 0], 48);
     f32.set([rw, rh, exposure, 0], 52);
+    u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
+    f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
+    f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];
@@ -209,6 +304,42 @@ async function init() {
         { binding: 3, resource: tex.radiance },
         { binding: 4, resource: tex.albedo },
         { binding: 5, resource: gCur },
+        { binding: 6, resource: { buffer: lightBuf } },
+        { binding: 7, resource: { buffer: reservoirBufA } },
+        { binding: 8, resource: tex.direct },
+      ],
+    });
+    const tr = device.createBindGroup({
+      layout: trPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 4, resource: gCur },
+        { binding: 6, resource: gPrev },
+        { binding: 7, resource: { buffer: reservoirBufA } },
+        { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 12, resource: tex.dup },
+      ],
+    });
+    const sp = device.createBindGroup({
+      layout: spPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 1, resource: { buffer: voxelBuf } },
+        { binding: 2, resource: { buffer: brickBuf } },
+        { binding: 3, resource: tex.radiance },
+        { binding: 4, resource: gCur },
+        { binding: 7, resource: { buffer: reservoirBufA } },
+        { binding: 8, resource: tex.direct },
+        { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 13, resource: { buffer: pairingBuf } },
+      ],
+    });
+    const dup = device.createBindGroup({
+      layout: dupPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 14, resource: tex.dup },
       ],
     });
     const tp = device.createBindGroup({
@@ -249,7 +380,7 @@ async function init() {
         { binding: 3, resource: linearSampler },
       ],
     });
-    return { pt, tp, at, pr };
+    return { pt, tr, sp, dup, tp, at, pr };
   }
 
   // --- Offscreen capture (used by the headless test; canvas presentation is
@@ -295,8 +426,24 @@ async function init() {
     g2.putImageData(img, 0, 0);
     buf.unmap(); buf.destroy(); target.destroy();
     const mean = sum / n;
+    // Tightly packed RGB bytes as base64, for exact off-page comparison.
+    let rgbB64 = '';
+    {
+      const rgb = new Uint8Array(rw * rh * 3);
+      for (let i = 0, j = 0; i < rw * rh; i++) {
+        rgb[j++] = img.data[i * 4];
+        rgb[j++] = img.data[i * 4 + 1];
+        rgb[j++] = img.data[i * 4 + 2];
+      }
+      let bin = '';
+      for (let i = 0; i < rgb.length; i += 8192) {
+        bin += String.fromCharCode.apply(null, rgb.subarray(i, i + 8192));
+      }
+      rgbB64 = btoa(bin);
+    }
     return {
       png: c2.toDataURL('image/png'),
+      rgb: rgbB64,
       mean, std: Math.sqrt(Math.max(0, sum2 / n - mean * mean)),
       w: rw, h: rh,
     };
@@ -326,6 +473,11 @@ async function init() {
       if (resizePending) { recreateTargets(); resizePending = false; }
 
       camera.update(dt);
+      if (benchMove) {
+        // Deterministic strafe (frame-indexed, not wall-clock) so benchmark
+        // runs of temporal behavior are reproducible.
+        camera.pos[0] = spawn.pos[0] + Math.sin(frame * 0.07) * benchMove;
+      }
       if (sunAnimate) sunAzimuth += dt * 0.15;
       writeUniforms(nowMs / 1000);
 
@@ -341,26 +493,24 @@ async function init() {
       const enc = device.createCommandEncoder();
       const wg = [Math.ceil(rw / 8), Math.ceil(rh / 8)];
 
-      let pass = enc.beginComputePass({ label: 'pathtrace' });
-      pass.setPipeline(ptPipeline);
-      pass.setBindGroup(0, bg.pt);
-      pass.dispatchWorkgroups(wg[0], wg[1]);
-      pass.end();
+      const compute = (label, pipeline, group) => {
+        const pass = enc.beginComputePass({ label });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, group);
+        pass.dispatchWorkgroups(wg[0], wg[1]);
+        pass.end();
+      };
 
-      pass = enc.beginComputePass({ label: 'temporal' });
-      pass.setPipeline(tPipeline);
-      pass.setBindGroup(0, bg.tp);
-      pass.dispatchWorkgroups(wg[0], wg[1]);
-      pass.end();
+      compute('pathtrace', ptPipeline, bg.pt);
+      if (restirFlags & RF.restir) {
+        if (restirFlags & RF.treuse) compute('reuse_temporal', trPipeline, bg.tr);
+        compute('reuse_spatial', spPipeline, bg.sp);
+        if (restirFlags & RF.dupmap) compute('dupmap', dupPipeline, bg.dup);
+      }
+      compute('temporal', tPipeline, bg.tp);
 
       if (denoiseOn) {
-        for (const group of bg.at) {
-          pass = enc.beginComputePass({ label: 'atrous' });
-          pass.setPipeline(aPipeline);
-          pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(wg[0], wg[1]);
-          pass.end();
-        }
+        for (const group of bg.at) compute('atrous', aPipeline, group);
       }
 
       if (ctx) {
@@ -387,6 +537,7 @@ async function init() {
       lastParity = parity;
       frame++;
       status.frames = frame;
+      status.frameMs = (status.frameMs || dt * 1000) * 0.9 + dt * 1000 * 0.1;
       status.ready = true;
 
       fpsAccum += dt; fpsCount++;
@@ -396,6 +547,8 @@ async function init() {
         hud.textContent =
           `${fps.toFixed(0)} fps | ${rw}x${rh} (scale ${renderScale.toFixed(2)}) | ` +
           `grid ${GRID}³ @ ${(VOXEL_SIZE * 100).toFixed(2)} cm voxels | ` +
+          `restir ${restirFlags & RF.restir ? `on [${preset}]` : 'off'} | ` +
+          `${scene.lightCount} light faces | ` +
           `bounces ${bounces} | denoise ${denoiseOn ? 'on' : 'off'} (F) | ` +
           `temporal ${temporalOn ? 'on' : 'off'} (T) | sun ${sunAnimate ? 'moving' : 'still'} (L)\n` +
           `click to capture mouse · WASD move · Space/Q up/down · Shift fast · ` +
@@ -405,6 +558,7 @@ async function init() {
       fatal(err.stack || err);
       return;
     }
+    if (stopAt > 0 && frame >= stopAt) { status.stopped = true; return; }
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);

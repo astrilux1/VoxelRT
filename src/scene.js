@@ -181,6 +181,28 @@ export function generateScene(N) {
         bricks[bx + by * BG + bz * BG * BG] = occ;
       }
 
+  // --- Emissive face list (area lights for NEE / unified ReSTIR) -----------
+  // Every exposed face of an emissive voxel becomes a sampleable area light:
+  // word0 = x | y<<9 | z<<18 | face<<27 (face: 0..5 = +x,-x,+y,-y,+z,-z),
+  // word1 = packed material. Requires N <= 512.
+  const faceDirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  const lightWords = [];
+  for (let z = 0; z < N; z++)
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const m = vox[idx(x, y, z)];
+        if (((m >>> 24) & 0xff) === 0 || m === 0) continue;
+        for (let f = 0; f < 6; f++) {
+          const [dx, dy, dz] = faceDirs[f];
+          const nx = x + dx, ny = y + dy, nz = z + dz;
+          if (!inb(nx, ny, nz) || vox[idx(nx, ny, nz)] === 0) {
+            lightWords.push((x | (y << 9) | (z << 18) | (f << 27)) >>> 0, m);
+          }
+        }
+      }
+  const lights = new Uint32Array(lightWords.length ? lightWords : [0, 0]);
+  const lightCount = lightWords.length / 2;
+
   // Spawn just outside the doorway, eye height, facing the room (+Z).
   const spawn = {
     pos: [
@@ -192,5 +214,5 @@ export function generateScene(N) {
     pitch: -0.05,
   };
 
-  return { vox, bricks, spawn, worldM };
+  return { vox, bricks, spawn, worldM, lights, lightCount };
 }
