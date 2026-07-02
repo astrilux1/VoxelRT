@@ -86,18 +86,26 @@ if (flag('--install-flip')) {
 
 // interior: Cornell-style room dominated by emissive voxel faces.
 // exterior: spawn-point terrain with sun/sky/lantern GI.
+// lamps: `?scene=lamps` room variant with heterogeneous emitters (tiny bright
+//        warm lamps, medium colored panels, large dim cool strips, occluders)
+//        so light-selection techniques have signal; pose sees all classes.
 const POSES = {
   interior: { px: 8.8, py: 4.7, pz: 7.0, yaw: -0.45, pitch: 0.02 },
   exterior: { px: 8.0, py: 4.9, pz: 4.6, yaw: 0.85, pitch: -0.10 },
+  lamps: { px: 6.6, py: 4.9, pz: 6.9, yaw: 0.55, pitch: 0.0 },
 };
 const MOVE_AMP = 0.6;
 const MOVE_FRAMES = 96;
 
+// A scenario may pin a scene variant; `scene` is appended to every query for
+// that scenario (test runs *and* its cached reference build).
 const SCENARIOS = {
   interior_static: { pose: POSES.interior, frames: framesDefault },
   interior_move: { pose: POSES.interior, frames: Math.max(framesDefault, MOVE_FRAMES), move: MOVE_AMP },
   exterior_static: { pose: POSES.exterior, frames: framesDefault },
   exterior_move: { pose: POSES.exterior, frames: Math.max(framesDefault, MOVE_FRAMES), move: MOVE_AMP },
+  lamps_static: { pose: POSES.lamps, frames: framesDefault, scene: 'lamps' },
+  lamps_move: { pose: POSES.lamps, frames: Math.max(framesDefault, MOVE_FRAMES), move: MOVE_AMP, scene: 'lamps' },
 };
 
 const BASE_CONFIGS = {
@@ -151,6 +159,12 @@ function configQuery(name) {
 
 function poseQuery(p) {
   return `px=${p.px}&py=${p.py}&pz=${p.pz}&yaw=${p.yaw}&pitch=${p.pitch}`;
+}
+
+// Scene-variant fragment for a scenario ('' for the default scene, so all
+// pre-existing scenario queries — and their cached references — are unchanged).
+function sceneQuery(scen) {
+  return scen.scene ? `&scene=${scen.scene}` : '';
 }
 
 function finalPose(scen) {
@@ -462,7 +476,7 @@ async function reference(name, scen) {
     height: view.height,
     scale: renderScale,
     bounces,
-    query: `preset=base&denoise=0&maxhist=1000000&${poseQuery(pose)}`,
+    query: `preset=base&denoise=0&maxhist=1000000&${poseQuery(pose)}${sceneQuery(scen)}`,
   };
   if (!forceRefs && existsSync(f32) && existsSync(metaPath)) {
     const old = JSON.parse(await readFile(metaPath, 'utf8'));
@@ -515,6 +529,7 @@ for (const sn of scenarioNames) {
 
       for (let rep = 0; rep < repeats; rep++) {
         const q = `${configQuery(cn)}&${poseQuery(scen.pose)}` +
+          sceneQuery(scen) +
           (scen.move ? `&benchmove=${scen.move}` : '') +
           `&fseed=${rep * 7717}`;
         const cap = await render(q, frameCount, { hdr: true });
