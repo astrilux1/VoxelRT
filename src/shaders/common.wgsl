@@ -25,7 +25,9 @@ struct Uniforms {
                               // z = contribution clamp, w = unused
   params5      : vec4<f32>,   // x = wide pairing sigma2 (px), y = adaptive candidate scale,
                               // z = confidence-denoise strength, w = mutation scale
-  params6      : vec4<f32>,   // x = light-grid candidates per cell, yzw = reserved
+  params6      : vec4<f32>,   // x = light-grid candidates per cell (?gridcand=;
+                              // currently unused — RF_LIGHTGRID samples the full
+                              // fixed K=16 per-cell table), yzw = reserved
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;

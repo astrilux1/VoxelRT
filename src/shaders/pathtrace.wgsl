@@ -25,8 +25,15 @@
 @group(0) @binding(8) var directOut   : texture_storage_2d<rgba16float, write>;
 // x = alias acceptance probability, y = alias index, z = selection PDF.
 @group(0) @binding(9) var<storage, read> lightAlias : array<vec4<f32>>;
+// Per-brick-cell top-K light table (RF_LIGHTGRID). Per cell, LG_STRIDE words:
+// [count, bitcast<f32> weightSum, (lightIndex, bitcast<f32> weight) × LG_K].
+@group(0) @binding(11) var<storage, read> lightGrid : array<u32>;
 
 const FIREFLY_CLAMP : f32 = 48.0;
+
+const LG_K : u32 = 16u;                    // entries stored (and used) per cell
+const LG_STRIDE : u32 = 2u + 2u * LG_K;
+const LG_PCELL : f32 = 0.75;               // mixture weight on the cell distribution
 
 struct LightPoint {
   pos  : vec3<f32>,   // world position on the face
@@ -35,23 +42,86 @@ struct LightPoint {
   pdfA : f32,         // area-measure pdf
 };
 
-fn sampleLightFace() -> LightPoint {
-  var lp : LightPoint;
+// Global light selection (power alias table when RF_LIGHTPOWER, else uniform).
+fn sampleGlobalLightIndex() -> u32 {
   let count = u.params2.y;
-  var li : u32;
-  var pdfSelect : f32;
   if (rflag(RF_LIGHTPOWER)) {
     let uLight = rand() * f32(count);
     let base = min(u32(uLight), count - 1u);
     let frac = uLight - f32(base);
     let rec = lightAlias[base];
     let aliasLi = min(u32(rec.y + 0.5), count - 1u);
-    li = select(base, aliasLi, frac >= rec.x);
-    pdfSelect = max(lightAlias[li].z, 1e-8);
-  } else {
-    li = min(u32(rand() * f32(count)), count - 1u);
-    pdfSelect = 1.0 / f32(count);
+    return select(base, aliasLi, frac >= rec.x);
   }
+  return min(u32(rand() * f32(count)), count - 1u);
+}
+
+fn globalLightPdf(li : u32) -> f32 {
+  if (rflag(RF_LIGHTPOWER)) { return max(lightAlias[li].z, 1e-8); }
+  return 1.0 / f32(u.params2.y);
+}
+
+struct LightPick {
+  li  : u32,   // light-list index
+  pdf : f32,   // exact selection pdf (discrete, over the light list)
+};
+
+// Pick one emissive face for NEE at shading position `pos` (meters).
+// RF_LIGHTGRID: draw from a mixture — with probability LG_PCELL from the
+// receiver cell's top-K distribution (w_i / W_cell), else from the global
+// distribution. The returned pdf is the EXACT mixture pdf
+//   p(i) = LG_PCELL * p_cell(i) + (1 - LG_PCELL) * p_global(i),
+// which is > 0 for every light (the global component covers the tail), so
+// RIS weights built from it stay unbiased. Cells with no usable entries fall
+// back to pure global sampling.
+fn pickLightIndex(pos : vec3<f32>) -> LightPick {
+  var pick : LightPick;
+  if (!rflag(RF_LIGHTGRID)) {
+    pick.li = sampleGlobalLightIndex();
+    pick.pdf = globalLightPdf(pick.li);
+    return pick;
+  }
+  let bc = clamp(vec3<i32>(floor(pos * (INV_VOXEL / f32(BRICK)))),
+                 vec3<i32>(0), vec3<i32>(BGRID - 1));
+  let base = u32(bc.x + bc.y * BGRID + bc.z * BGRID * BGRID) * LG_STRIDE;
+  let n = min(lightGrid[base], LG_K);
+  let wSum = bitcast<f32>(lightGrid[base + 1u]);
+  if (n == 0u || wSum <= 0.0) {
+    pick.li = sampleGlobalLightIndex();
+    pick.pdf = globalLightPdf(pick.li);
+    return pick;
+  }
+  var li : u32;
+  if (rand() < LG_PCELL) {
+    // Draw from the cell's top-K distribution by cumulative weight.
+    var r = rand() * wSum;
+    li = lightGrid[base + 2u];
+    for (var k = 0u; k < n; k++) {
+      li = lightGrid[base + 2u + 2u * k];
+      r -= bitcast<f32>(lightGrid[base + 3u + 2u * k]);
+      if (r <= 0.0) { break; }
+    }
+  } else {
+    li = sampleGlobalLightIndex();
+  }
+  // Exact mixture pdf: linear scan for the cell weight of the chosen light.
+  var pCell = 0.0;
+  for (var k = 0u; k < n; k++) {
+    if (lightGrid[base + 2u + 2u * k] == li) {
+      pCell = bitcast<f32>(lightGrid[base + 3u + 2u * k]) / wSum;
+      break;
+    }
+  }
+  pick.li = li;
+  pick.pdf = LG_PCELL * pCell + (1.0 - LG_PCELL) * globalLightPdf(li);
+  return pick;
+}
+
+fn sampleLightFace(shadePos : vec3<f32>) -> LightPoint {
+  var lp : LightPoint;
+  let pick = pickLightIndex(shadePos);
+  let li = pick.li;
+  let pdfSelect = pick.pdf;
   let l = lights[li];
   let v = vec3<f32>(f32(l.x & 0x1ffu), f32((l.x >> 9u) & 0x1ffu), f32((l.x >> 18u) & 0x1ffu));
   let face = (l.x >> 27u) & 7u;
@@ -74,7 +144,7 @@ fn sampleLightFace() -> LightPoint {
 // (full, non-demodulated contribution; used at secondary vertices).
 fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>) -> vec3<f32> {
   if (u.params2.y == 0u) { return vec3<f32>(0.0); }
-  let lp = sampleLightFace();
+  let lp = sampleLightFace(pos);
   let surf = pos + n * 1e-3;
   let d = lp.pos - surf;
   let r2 = max(dot(d, d), 1e-6);
@@ -262,7 +332,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var eSelP = 0.0;
     var eSelPdf = 1.0;
     for (var k = 0u; k < 4u; k++) {
-      let lp = sampleLightFace();
+      let lp = sampleLightFace(x1);
       var s : Sample;
       s.kind = SK_POINT;
       s.pos = lp.pos;

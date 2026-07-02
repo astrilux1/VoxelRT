@@ -5,6 +5,15 @@
 export const VOXEL_SIZE = 1 / 16;   // meters
 export const BRICK = 8;
 
+// Per-brick-cell light table (RF_LIGHTGRID): top-K lights per brick cell.
+// Layout per cell (LIGHTGRID_STRIDE u32 words):
+//   word 0            = entry count (<= LIGHTGRID_K)
+//   word 1            = f32 bitcast: sum of the kept entries' weights
+//   words 2 + 2k      = light index of entry k
+//   words 3 + 2k      = f32 bitcast: weight of entry k
+export const LIGHTGRID_K = 16;
+export const LIGHTGRID_STRIDE = 2 + 2 * LIGHTGRID_K;
+
 // Pack a material: linear-ish byte color + emissive intensity byte (0 = off).
 const M = (r, g, b, e = 0) => ((r | (g << 8) | (b << 16) | (e << 24)) >>> 0);
 
@@ -77,6 +86,99 @@ function makeAliasTable(weights) {
     table[i * 4 + 3] = 0;
   }
   return table;
+}
+
+// ReGIR-style world-space light structure for RF_LIGHTGRID: for every brick
+// cell, rank all emissive faces by approximate importance
+//   w_i = power_i / max(dist(cellCenter, faceCenter)^2, eps)
+// with a conservative facing test (a cell whose center is behind the face's
+// plane gets w_i = 0), and keep the top LIGHTGRID_K entries plus their weight
+// sum. The scene is static, so this is built once on the CPU. Distances are
+// in voxel units — p_cell(i) = w_i / W_cell is invariant to the unit choice.
+function buildLightGrid(N, lightWords, lightWeights) {
+  const t0 = performance.now();
+  const BG = N / BRICK;
+  const cellCount = BG * BG * BG;
+  const grid = new Uint32Array(cellCount * LIGHTGRID_STRIDE);
+  const gridF = new Float32Array(grid.buffer);
+  const lightCount = lightWeights.length;
+  if (lightCount === 0) {
+    return { grid, buildMs: performance.now() - t0 };
+  }
+
+  // Per-light face centers/normals (voxel units), unpacked once.
+  const fcx = new Float32Array(lightCount);
+  const fcy = new Float32Array(lightCount);
+  const fcz = new Float32Array(lightCount);
+  const fnx = new Float32Array(lightCount);
+  const fny = new Float32Array(lightCount);
+  const fnz = new Float32Array(lightCount);
+  for (let i = 0; i < lightCount; i++) {
+    const w0 = lightWords[i * 2];
+    const x = w0 & 0x1ff, y = (w0 >>> 9) & 0x1ff, z = (w0 >>> 18) & 0x1ff;
+    const face = (w0 >>> 27) & 7;
+    const axis = face >> 1;
+    const posSide = (face & 1) === 0 ? 1 : 0;       // +side faces sit at v+1
+    let cx = x + 0.5, cy = y + 0.5, cz = z + 0.5;
+    let nx = 0, ny = 0, nz = 0;
+    const sign = posSide ? 1 : -1;
+    if (axis === 0) { cx = x + posSide; nx = sign; }
+    else if (axis === 1) { cy = y + posSide; ny = sign; }
+    else { cz = z + posSide; nz = sign; }
+    fcx[i] = cx; fcy[i] = cy; fcz[i] = cz;
+    fnx[i] = nx; fny[i] = ny; fnz[i] = nz;
+  }
+
+  // Importance saturates below half a brick of distance (also avoids the
+  // 1/d^2 singularity for lights inside the cell itself).
+  const eps = (BRICK / 2) * (BRICK / 2);
+  const K = LIGHTGRID_K;
+  const topIdx = new Uint32Array(K);
+  const topW = new Float32Array(K);
+
+  for (let bz = 0; bz < BG; bz++) {
+    const ccz = (bz + 0.5) * BRICK;
+    for (let by = 0; by < BG; by++) {
+      const ccy = (by + 0.5) * BRICK;
+      for (let bx = 0; bx < BG; bx++) {
+        const ccx = (bx + 0.5) * BRICK;
+        let count = 0;
+        let minW = 0;   // smallest kept weight (only valid once count == K)
+        let minAt = 0;
+        for (let i = 0; i < lightCount; i++) {
+          const dx = ccx - fcx[i], dy = ccy - fcy[i], dz = ccz - fcz[i];
+          // Facing: cell center strictly in front of the emissive plane.
+          if (dx * fnx[i] + dy * fny[i] + dz * fnz[i] <= 0) continue;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          const w = lightWeights[i] / (d2 > eps ? d2 : eps);
+          if (count < K) {
+            topIdx[count] = i;
+            topW[count] = w;
+            count++;
+            if (count === K) {
+              minW = topW[0]; minAt = 0;
+              for (let k = 1; k < K; k++) if (topW[k] < minW) { minW = topW[k]; minAt = k; }
+            }
+          } else if (w > minW) {
+            topIdx[minAt] = i;
+            topW[minAt] = w;
+            minW = topW[0]; minAt = 0;
+            for (let k = 1; k < K; k++) if (topW[k] < minW) { minW = topW[k]; minAt = k; }
+          }
+        }
+        const base = (bx + by * BG + bz * BG * BG) * LIGHTGRID_STRIDE;
+        let wSum = 0;
+        for (let k = 0; k < count; k++) wSum += topW[k];
+        grid[base] = count;
+        gridF[base + 1] = wSum;
+        for (let k = 0; k < count; k++) {
+          grid[base + 2 + 2 * k] = topIdx[k];
+          gridF[base + 3 + 2 * k] = topW[k];
+        }
+      }
+    }
+  }
+  return { grid, buildMs: performance.now() - t0 };
 }
 
 // Deterministic 2D value noise for the terrain.
@@ -266,6 +368,8 @@ export function generateScene(N) {
   const lights = new Uint32Array(lightWords.length ? lightWords : [0, 0]);
   const lightCount = lightWords.length / 2;
   const lightAlias = makeAliasTable(lightWeights);
+  const { grid: lightGrid, buildMs: lightGridMs } =
+    buildLightGrid(N, lightWords, lightWeights);
 
   // Spawn just outside the doorway, eye height, facing the room (+Z).
   const spawn = {
@@ -278,5 +382,6 @@ export function generateScene(N) {
     pitch: -0.05,
   };
 
-  return { vox, bricks, brickMasks, spawn, worldM, lights, lightCount, lightAlias };
+  return { vox, bricks, brickMasks, spawn, worldM, lights, lightCount, lightAlias,
+           lightGrid, lightGridMs };
 }
