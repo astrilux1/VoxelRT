@@ -11,7 +11,8 @@
 @group(0) @binding(7) var accumOut    : texture_storage_2d<rgba16float, write>;
 @group(0) @binding(8) var linearSamp  : sampler;
 
-const MAX_HISTORY : f32 = 64.0;
+// Maximum accumulated history length comes from params4.y (default 64;
+// the benchmark's reference mode raises it to accumulate indefinitely).
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -53,7 +54,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
       if (depthOk && normalOk) {
         let prev = textureSampleLevel(accumPrev, linearSamp, prevUv, 0.0);
-        history = min(prev.a, MAX_HISTORY) + 1.0;
+        history = min(prev.a, u.params4.y) + 1.0;
         let alpha = 1.0 / history;
         color = mix(prev.rgb, cur, alpha);
       }

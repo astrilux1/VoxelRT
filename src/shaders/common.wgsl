@@ -19,9 +19,29 @@ struct Uniforms {
   sunRadiance  : vec4<f32>,   // rgb = sun irradiance E, w = sky intensity
   params0      : vec4<u32>,   // x = frame index, y = indirect bounce count, z = flags, w = unused
   params1      : vec4<f32>,   // x = render width, y = render height, z = exposure, w = unused
+  params2      : vec4<u32>,   // x = restir flags, y = light face count, z = spatial taps, w = unused
+  params3      : vec4<f32>,   // x = cCap, y = cCapMin, z = dup alpha, w = footprint c
+  params4      : vec4<f32>,   // x = spatial sigma/radius (px), y = max accum history,
+                              // z = contribution clamp, w = unused
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
+
+// params2.x flag bits — which parts of the ReSTIR pipeline are active.
+const RF_RESTIR    : u32 = 1u;     // reservoir pipeline on (off = plain 1-spp PT)
+const RF_TEMPORAL  : u32 = 2u;     // temporal reservoir reuse
+const RF_SPATIAL   : u32 = 4u;     // spatial reservoir reuse
+const RF_PAIRED    : u32 = 8u;     // paired Gaussian reuse (Lin 2026 §3); off = random disk
+const RF_DUPMAP    : u32 = 16u;    // duplication-map adaptive cCap (Lin 2026 §5)
+const RF_FOOTPRINT : u32 = 32u;    // footprint reconnection criterion (Lin 2026 §4)
+const RF_VECTOR    : u32 = 64u;    // vector-valued shading weights (Lin 2026 §6.3)
+const RF_UNIFIED   : u32 = 128u;   // unified DI+GI reservoir with light-list NEE (Lin 2026 §6.1)
+const RF_PLANE     : u32 = 256u;   // ours: exact voxel-plane neighbor validation
+const RF_RESCUE    : u32 = 512u;   // ours: disocclusion history rescue (3x3 search)
+const RF_FULLV     : u32 = 1024u;  // ours: revalidate canonical visibility when shading
+const RF_CLAMP     : u32 = 2048u;  // ours: reservoir contribution clamp
+
+fn rflag(bit : u32) -> bool { return (u.params2.x & bit) != 0u; }
 
 // ---------------------------------------------------------------------------
 // RNG — PCG hash, one stream per pixel per frame.
