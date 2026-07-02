@@ -50,6 +50,10 @@ const denoise = arg('--denoise', '0');
 const timing = !flag('--no-timing');
 const timingWarmup = parseInt(arg('--time-warmup', '4'), 10);
 const refFrames = parseInt(arg('--ref-frames', suite === 'smoke' ? '16' : '1600'), 10);
+// References use a much deeper bounce cut than the real-time operating point:
+// this interior's Neumann series still gains +0.3% R from bounce 8 to 10, so a
+// bounces=2 "reference" is ~15% dark and poisons every bias/FLIP number.
+const refBounces = parseInt(arg('--ref-bounces', '12'), 10);
 const framesDefault = parseInt(arg('--frames', suite === 'smoke' ? '8' : '64'), 10);
 const repeats = parseInt(arg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
 const wantFlip = flag('--flip') || suite === 'paper';
@@ -449,7 +453,7 @@ async function writeCapture(stem, capture, extraMeta = {}) {
 
 async function reference(name, scen) {
   await mkdir(REFDIR, { recursive: true });
-  const stem = `${safe(name)}_${view.width}x${view.height}_s${safe(renderScale)}_b${bounces}`;
+  const stem = `${safe(name)}_${view.width}x${view.height}_s${safe(renderScale)}_rb${refBounces}`;
   const f32 = join(REFDIR, `${stem}.rgbf32`);
   const png = join(REFDIR, `${stem}.png`);
   const metaPath = join(REFDIR, `${stem}.json`);
@@ -461,8 +465,8 @@ async function reference(name, scen) {
     width: view.width,
     height: view.height,
     scale: renderScale,
-    bounces,
-    query: `preset=base&denoise=0&maxhist=1000000&${poseQuery(pose)}`,
+    bounces: refBounces,
+    query: `preset=base&denoise=0&maxhist=1000000&bounces=${refBounces}&${poseQuery(pose)}`,
   };
   if (!forceRefs && existsSync(f32) && existsSync(metaPath)) {
     const old = JSON.parse(await readFile(metaPath, 'utf8'));
