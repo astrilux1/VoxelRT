@@ -33,7 +33,7 @@ let sunElevation = 0.85;
 const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
-  lightpower: 4096,
+  lightpower: 4096, mixsigma: 8192,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
@@ -59,6 +59,7 @@ for (const k of Object.keys(RF)) {          // per-flag URL overrides
 const tuning = {
   taps: parseInt(params.get('taps') || '3', 10),
   sigma: parseFloat(params.get('sigma') || '16'),      // pairing texture σ (px)
+  sigma2: parseFloat(params.get('sigma2') || '48'),    // wide-tap σ (px, RF_MIXSIGMA)
   radius: parseFloat(params.get('radius') || '30'),    // random-disk radius (px)
   ccap: parseFloat(params.get('ccap') || '20'),
   capmin: parseFloat(params.get('capmin') || '1'),
@@ -174,7 +175,7 @@ async function init() {
   device.queue.writeBuffer(brickMaskBuf, 0, scene.brickMasks);
 
   const uniformBuf = device.createBuffer({
-    label: 'uniforms', size: 272,
+    label: 'uniforms', size: 288,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -191,7 +192,12 @@ async function init() {
   device.queue.writeBuffer(lightAliasBuf, 0, scene.lightAlias);
 
   // Self-inverting Gaussian pairing textures for paired spatial reuse.
-  const pairingData = makePairingBuffer(Math.max(0.8, tuning.sigma));
+  // With RF_MIXSIGMA the wide-σ tap lives in texture 0 — the largest (254²),
+  // so the least Gaussian tail wraps by tiling — and reuse_spatial.wgsl
+  // routes the LAST tap there; the other taps keep the base σ.
+  const sigmaBase = Math.max(0.8, tuning.sigma);
+  const sigmaWide = (restirFlags & RF.mixsigma) ? Math.max(0.8, tuning.sigma2) : sigmaBase;
+  const pairingData = makePairingBuffer([sigmaWide, sigmaBase, sigmaBase]);
   const pairingBuf = device.createBuffer({
     label: 'pairing', size: pairingData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -302,7 +308,7 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
-  const uniformData = new ArrayBuffer(272);
+  const uniformData = new ArrayBuffer(288);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
   let prevViewProj = null;
@@ -339,6 +345,7 @@ async function init() {
     u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
     f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
+    f32.set([tuning.sigma2, 0, 0, 0], 68);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];
