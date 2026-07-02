@@ -235,7 +235,8 @@ async function init() {
   const [ptModule, trModule, spModule, dupModule, tModule, aModule, prModule] =
     await Promise.all([
       makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))),
-      makeModule(device, 'reuse_temporal', common + restirLib + (await loadShader('reuse_temporal.wgsl'))),
+      // voxelLib: RF_MUTATE traces DDA visibility rays during temporal reuse.
+      makeModule(device, 'reuse_temporal', common + restirLib + voxelLib + (await loadShader('reuse_temporal.wgsl'))),
       makeModule(device, 'reuse_spatial', common + restirLib + voxelLib + (await loadShader('reuse_spatial.wgsl'))),
       makeModule(device, 'dupmap', common + restirLib + (await loadShader('dupmap.wgsl'))),
       makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))
@@ -396,10 +397,13 @@ async function init() {
       layout: trPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 1, resource: { buffer: voxelBuf } },
+        { binding: 2, resource: { buffer: brickBuf } },
         { binding: 4, resource: gCur },
         { binding: 6, resource: gPrev },
         { binding: 7, resource: { buffer: reservoirBufA } },
         { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 10, resource: { buffer: brickMaskBuf } },
         { binding: 12, resource: tex.dup },
       ],
     });
@@ -677,7 +681,8 @@ async function init() {
       if (restirFlags & RF.restir) {
         if (restirFlags & RF.treuse) compute('reuse_temporal', trPipeline, bg.tr);
         compute('reuse_spatial', spPipeline, bg.sp);
-        if (restirFlags & RF.dupmap) compute('dupmap', dupPipeline, bg.dup);
+        // dupmap also feeds the RF_MUTATE trigger, so it runs for either flag.
+        if (restirFlags & (RF.dupmap | RF.mutate)) compute('dupmap', dupPipeline, bg.dup);
       }
       compute('temporal', tPipeline, bg.tp);
 

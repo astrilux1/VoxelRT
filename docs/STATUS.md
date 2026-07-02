@@ -112,6 +112,25 @@ output is **bit-identical** flag on vs off (verified: 8-frame 1080p HDR
 readbacks byte-equal). Presented-path axis only; measure per
 RESEARCH_LOOP.md on denoised results at low frame budgets under motion.
 
+## RF_MUTATE (`?mutate=1`, params5.w = `?mutscale=`, default 0.5)
+
+Intra-face MCMC decorrelation (PLAN.md Tier-2 idea 8), implemented in
+`reuse_temporal.wgsl` after the temporal merge. With probability equal to the
+pixel's duplication score (the dupmap pass now also runs when only `mutate`
+is set), a merged SK_POINT sample whose stored radiance exactly matches the
+f16-quantized face-constant Le of its emissive voxel face is mutated by one
+Metropolis-Hastings step: symmetric uniform jitter (half-width `mutscale` ×
+face size, reflected at the face edges) in the face plane, target =
+`evalTarget` × one-DDA-ray visibility, proposal re-encoded through the
+reservoir packing before the ratio is evaluated, `W *= p̂(y)/p̂(y')` on
+accept, confidence untouched. Intended as the unbiased replacement for the
+dupmap's cCap darkening: measure `ours&dupmap=0&mutate=1` vs `ours`.
+Smoke (32f, 1080p, denoise=0, `ours&dupmap=0`): HDR channel means match
+on-vs-off to <2e-5 relative (exterior 0.431858/0.468142/0.434026 vs
+0.431852/0.468144/0.434026; interior 1.318801/0.939388/0.684663 vs
+1.318795/0.939389/0.684666) while 38–63% of pixels differ — the kernel fires
+and the MH invariant holds. Converged bias check still pending.
+
 ## Energy loss in `ours`: candidate fix landed, needs converged confirmation
 
 Bias validation (long-converged `ours` vs long-converged `base` at the same
