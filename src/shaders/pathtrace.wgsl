@@ -29,7 +29,10 @@
 // [count, bitcast<f32> weightSum, (lightIndex, bitcast<f32> weight) × LG_K].
 @group(0) @binding(11) var<storage, read> lightGrid : array<u32>;
 
-const FIREFLY_CLAMP : f32 = 48.0;
+// Firefly clamp, host-injected (?fclamp=, default 48; 0 disables). Clamping
+// improves early images but hides converged energy — bias checks and
+// references should run with it off (RESEARCH_LOOP.md traps).
+const FIREFLY_CLAMP : f32 = FCLAMP_VALUE;
 
 const LG_K : u32 = 16u;                    // entries stored (and used) per cell
 const LG_STRIDE : u32 = 2u + 2u * LG_K;
@@ -239,7 +242,7 @@ fn estimateLo(x2 : vec3<f32>, n2In : vec3<f32>, mat2 : Material, unified : bool)
     n = h.n;
     mat = unpackMaterial(h.mat);
   }
-  return min(Lo, vec3<f32>(FIREFLY_CLAMP));
+  return select(min(Lo, vec3<f32>(FIREFLY_CLAMP)), Lo, FIREFLY_CLAMP <= 0.0);
 }
 
 @compute @workgroup_size(8, 8)
@@ -320,7 +323,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       mat = unpackMaterial(h.mat);
     }
 
-    radiance = min(radiance, vec3<f32>(FIREFLY_CLAMP));
+    radiance = select(min(radiance, vec3<f32>(FIREFLY_CLAMP)), radiance, FIREFLY_CLAMP <= 0.0);
     let demod = radiance / max(mat1.albedo, vec3<f32>(1e-3));
     textureStore(radianceOut, pix, vec4<f32>(demod, 1.0));
     return;
@@ -421,7 +424,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       s.kind = SK_POINT;
       s.pos = x2;
       s.n = h.n;
-      s.rad = min(Lo, vec3<f32>(FIREFLY_CLAMP));
+      s.rad = select(min(Lo, vec3<f32>(FIREFLY_CLAMP)), Lo, FIREFLY_CLAMP <= 0.0);
       let d = x2 - x1;
       let r2 = max(dot(d, d), 1e-6);
       let cos1 = max(dot(n1, normalize(d)), 1e-4);

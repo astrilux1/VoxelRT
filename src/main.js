@@ -248,7 +248,8 @@ async function init() {
   const voxelLib = await loadShader('voxel.wgsl');
   const [ptModule, trModule, spModule, dupModule, tModule, aModule, prModule] =
     await Promise.all([
-      makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))),
+      makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))
+        .replace('FCLAMP_VALUE', parseFloat(params.get('fclamp') || '48').toFixed(1))),
       // voxelLib: RF_MUTATE traces DDA visibility rays during temporal reuse.
       makeModule(device, 'reuse_temporal', common + restirLib + voxelLib + (await loadShader('reuse_temporal.wgsl'))),
       makeModule(device, 'reuse_spatial', common + restirLib + voxelLib + (await loadShader('reuse_spatial.wgsl'))),
