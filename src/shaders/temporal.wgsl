@@ -54,7 +54,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
       if (depthOk && normalOk) {
         let prev = textureSampleLevel(accumPrev, linearSamp, prevUv, 0.0);
-        history = min(prev.a, u.params4.y) + 1.0;
+        var histCap = u.params4.y;
+        // RF_CONFDENOISE: reservoir-quality-driven history cap. q rides in
+        // the radiance alpha (written by reuse_spatial.wgsl); low q —
+        // disocclusion, failed reuse, heavy sample duplication — shortens
+        // the cap so stale/correlated history decays faster. Guarded by the
+        // host's denoise-active bit (params0.z bit 1): this feature may only
+        // affect the denoised/presented path, so the algorithm-only
+        // (denoise=0) output stays bit-identical with the flag on or off.
+        if (rflag(RF_CONFDENOISE) && (u.params0.z & 2u) != 0u) {
+          let q = clamp(textureLoad(radianceCur, pix, 0).a, 0.0, 1.0);
+          histCap = u.params4.y * mix(0.125, 1.0, q);
+        }
+        history = min(prev.a, histCap) + 1.0;
         let alpha = 1.0 / history;
         color = mix(prev.rgb, cur, alpha);
       }

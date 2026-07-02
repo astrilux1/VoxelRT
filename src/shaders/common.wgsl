@@ -17,7 +17,9 @@ struct Uniforms {
   prevCamPos   : vec4<f32>,   // xyz = previous frame position
   sunDir       : vec4<f32>,   // xyz = direction TO the sun, w = cos(angular radius)
   sunRadiance  : vec4<f32>,   // rgb = sun irradiance E, w = sky intensity
-  params0      : vec4<u32>,   // x = frame index, y = indirect bounce count, z = flags, w = unused
+  params0      : vec4<u32>,   // x = frame index, y = indirect bounce count,
+                              // z = flags (bit 0 = temporal accum on, bit 1 = denoise
+                              // active — gates presented-path-only features), w = unused
   params1      : vec4<f32>,   // x = render width, y = render height, z = exposure, w = unused
   params2      : vec4<u32>,   // x = restir flags, y = light face count, z = spatial taps, w = unused
   params3      : vec4<f32>,   // x = cCap, y = cCapMin, z = dup alpha, w = footprint c

@@ -19,6 +19,8 @@
 //
 // Output: demodulated radiance = pass-through direct + reservoir shading,
 // and the post-reuse reservoir that becomes next frame's temporal history.
+// With RF_CONFDENOISE the radiance alpha carries the estimator-quality
+// signal q (see qualitySignal below); otherwise it stays a constant 1.0.
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(3) var radianceOut : texture_storage_2d<rgba16float, write>;
@@ -26,8 +28,29 @@
 @group(0) @binding(7) var<storage, read> reservoirsA : array<Reservoir>;
 @group(0) @binding(8) var directTex : texture_2d<f32>;
 @group(0) @binding(9) var<storage, read_write> reservoirsB : array<Reservoir>;
+// Previous frame's sample-duplication map (written by dupmap.wgsl after this
+// pass; only consumed here when RF_CONFDENOISE is set).
+@group(0) @binding(12) var dupTex : texture_2d<f32>;
 // Concatenated pairing textures (2 x i16 coordinate deltas per texel).
 @group(0) @binding(13) var<storage, read> pairing : array<u32>;
+
+// RF_CONFDENOISE: per-pixel estimator-quality signal q in [0,1], carried in
+// the radiance alpha channel (which is otherwise a constant 1.0 that nothing
+// reads). q multiplies two proxies of actual estimator quality:
+//   - post-spatial reservoir confidence c, normalized by 2*cCap (the
+//     steady-state scale of a canonical + 3-tap merge whose inputs are each
+//     capped near cCap) — low after disocclusion or failed reuse;
+//   - one minus the duplication score D (previous frame's dupmap at this
+//     pixel) — high duplication means correlated samples masquerading as
+//     converged.
+// Downstream (denoised path only): temporal.wgsl shortens the history cap
+// and atrous.wgsl strengthens filtering as q falls. With the flag off the
+// alpha stays 1.0 exactly as before.
+fn qualitySignal(c : f32, pix : vec2<i32>) -> f32 {
+  let conf = clamp(c / max(2.0 * u.params3.x, 1.0), 0.0, 1.0);
+  let dupS = clamp(textureLoad(dupTex, pix, 0).x, 0.0, 1.0);
+  return conf * (1.0 - dupS);
+}
 
 // Pairing texture sizes are mutually near-coprime so tiling periods do not
 // align (cf. Lin 2026 footnote 3).
@@ -187,7 +210,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   if (nCand == 0u) {
-    textureStore(radianceOut, pix, vec4<f32>(direct, 1.0));
+    // Empty reservoir: zero confidence when the quality signal is active.
+    textureStore(radianceOut, pix,
+      vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
     reservoirsB[pixIdx] = emptyReservoir();
     return;
   }
@@ -236,7 +261,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   if (sel.kind == SK_NONE || selP <= 0.0 || wSum <= 0.0) {
-    textureStore(radianceOut, pix, vec4<f32>(direct, 1.0));
+    // Resampling failed: zero confidence when the quality signal is active.
+    textureStore(radianceOut, pix,
+      vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
     reservoirsB[pixIdx] = emptyReservoir();
     return;
   }
@@ -255,6 +282,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (l > u.params4.z) { contrib *= u.params4.z / l; }
   }
 
-  textureStore(radianceOut, pix, vec4<f32>(direct + contrib, 1.0));
+  var qual = 1.0;
+  if (rflag(RF_CONFDENOISE)) { qual = qualitySignal(sel.c, pix); }
+  textureStore(radianceOut, pix, vec4<f32>(direct + contrib, qual));
   reservoirsB[pixIdx] = packReservoir(sel);
 }
