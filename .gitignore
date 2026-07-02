@@ -1,3 +1,4 @@
 node_modules/
 test/screenshot.png
+test/eval/
 package-lock.json

@@ -1,13 +1,15 @@
-// Headless smoke test: boots the renderer in Chromium with software WebGPU
-// (SwiftShader), waits for frames to be produced, then captures a screenshot
-// and verifies the image is not blank.
+// Headless smoke test: boots the renderer in Chromium with WebGPU, waits for
+// frames to be produced, then captures a screenshot and verifies the image is
+// not blank.
 //
 // Usage: node test/screenshot.mjs [--frames N] [--out path.png]
 
 import { chromium } from 'playwright';
 import http from 'node:http';
+import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const getArg = (name, dflt) => {
@@ -16,7 +18,25 @@ const getArg = (name, dflt) => {
 };
 const WAIT_FRAMES = parseInt(getArg('--frames', '12'), 10);
 const OUT = getArg('--out', 'test/screenshot.png');
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function findChromiumExecutable() {
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    const root = join(process.env.LOCALAPPDATA, 'ms-playwright');
+    if (existsSync(root)) {
+      const dirs = readdirSync(root)
+        .filter((d) => /^chromium-\d+$/.test(d))
+        .sort()
+        .reverse();
+      for (const d of dirs) {
+        const exe = join(root, d, 'chrome-win64', 'chrome.exe');
+        if (existsSync(exe)) return exe;
+      }
+    }
+  }
+  return null;
+}
 
 const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.wgsl': 'text/plain', '.png': 'image/png',
@@ -39,22 +59,21 @@ const server = http.createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
-  args: [
-    '--no-sandbox',
-    '--enable-unsafe-webgpu',
-    '--enable-features=Vulkan',
-    '--use-webgpu-adapter=swiftshader',
-    '--use-angle=swiftshader',
-  ],
-});
+const browserArgs = [
+  '--no-sandbox',
+  '--enable-unsafe-webgpu',
+  '--enable-features=Vulkan',
+];
+const launch = { args: browserArgs };
+const chromiumExecutable = findChromiumExecutable();
+if (chromiumExecutable) launch.executablePath = chromiumExecutable;
+const browser = await chromium.launch(launch);
 
 const page = await browser.newPage({ viewport: { width: 480, height: 270 } });
 page.on('console', (m) => console.log(`[page:${m.type()}]`, m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 
-// Small render target + 1 bounce keeps software rasterization tolerable.
+// Small render target + 1 bounce keeps the smoke test quick.
 const query = getArg('--query', 'scale=0.5&bounces=1&nocanvas=1');
 await page.goto(`http://127.0.0.1:${port}/?${query}`);
 

@@ -103,22 +103,21 @@ which is legitimately biased) should match `base` to >30 dB.
 
 ## Pivot: use the paper's evaluation pipeline (do not reinvent)
 
-The custom low-res harness (`test/bench.mjs`, SwiftShader at 240×135) was
-useful for correctness/smoke work but is the wrong instrument for the 2–3×
-claim: resolution is far below the paper's 1920×1080, software rasterization
-distorts cost ratios, and PSNR-on-tonemapped-8-bit is not their metric.
-Keep it for regression/bias checks; do the headline evaluation the way the
-paper does:
+The original low-res harness (`test/bench.mjs` at 240×135) was useful for
+correctness/smoke work but is the wrong instrument for the 2–3× claim:
+resolution is far below the paper's 1920×1080, wall-clock boot/render timing
+distorts cost ratios, and PSNR-on-tonemapped-8-bit is not their metric. Keep
+small hardware runs for regression/bias checks; do the headline evaluation the
+way the paper does:
 
 1. **Metric: HDR ꟻLIP** (Andersson et al. 2021), which is what Lin 2026
    reports throughout. NVIDIA's reference implementation
    (github.com/NVlabs/flip) is a small Python/C++ tool; wire it to compare
    HDR (pre-tonemap) dumps. Add a linear-radiance readback path next to the
    existing 8-bit capture.
-2. **Resolution/hardware**: render at 1920×1080 on a real GPU (any WebGPU
-   browser on hardware; the harness already runs in Chromium — drop
-   SwiftShader flags and it will use the local GPU). SwiftShader remains the
-   CI fallback only.
+2. **Resolution/hardware**: render at 1920×1080 on a real GPU through a
+   WebGPU browser. The harness should treat local GPU execution as the only
+   benchmark path.
 3. **References**: converged accumulation (the harness's
    `preset=base&denoise=0&maxhist=1e6` path) per pose, frozen and cached —
    equivalent to their offline references.
@@ -142,9 +141,9 @@ paper does:
 
 1. Fix the energy loss (bisection above; fix, then re-run the bias check —
    target >30 dB agreement of converged `ours&dupmap=0` vs `base`).
-2. Add HDR (pre-tonemap) readback + ꟻLIP scoring + `timestamp-query`
-   per-pass timings to the harness; default bench resolution 1920×1080 on
-   hardware, 480×270 SwiftShader kept for CI smoke.
+2. Add/verify HDR (pre-tonemap) readback + ꟻLIP scoring + `timestamp-query`
+   per-pass timings to the harness; default benchmark resolution 1920×1080 on
+   hardware, with smaller hardware-only smoke runs for quick checks.
 3. Build the ablation table & convergence curves (protocol above). Tune
    `lin` honestly (σ=16 / R=30 / cCap=20 per paper defaults at 1080p).
 4. Push `ours` past 2–3×: the biggest untapped, voxel-specific levers —

@@ -8,10 +8,10 @@ every visible pixel is the result of a ray marched through a 256³ voxel grid.
 ![exterior](docs/shot_exterior.png)
 ![interior](docs/shot_interior.png)
 
-*Above: converged captures from the headless test rig (SwiftShader software
-WebGPU). Note the green/red bounce light on the white walls and the emissive
-ceiling panel — all illumination is path traced; there are no precomputed
-lightmaps or ambient terms.*
+*Above: converged captures from the headless WebGPU test rig. Note the
+green/red bounce light on the white walls and the emissive ceiling panel — all
+illumination is path traced; there are no precomputed lightmaps or ambient
+terms.*
 
 ## Features
 
@@ -92,13 +92,16 @@ accumulation history; the G-buffer is `rgba32float` (normal + hit distance).
 
 ## Testing
 
-A headless smoke test boots the renderer in Chromium with software WebGPU
-(SwiftShader), waits for frames, reads the image back **from the GPU** (canvas
-presentation isn't composited in headless mode) and fails on a blank image:
+A headless smoke test boots the renderer in Chromium with WebGPU, waits for
+frames, reads the image back **from the GPU** (canvas presentation isn't
+composited in headless mode) and fails on a blank image:
 
 ```sh
 npm install
 npm test                       # writes test/screenshot.png
+npm run bench                  # tiny HDR benchmark smoke
+npm run bench:ablation         # 1920x1080 paper-style ablation harness
+npm run bench:convergence      # convergence curves over fixed frame budgets
 ```
 
 ## Notes on the demo scene

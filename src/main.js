@@ -106,7 +106,11 @@ async function init() {
   if (!navigator.gpu) throw new Error('WebGPU is not available in this browser.');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No WebGPU adapter found.');
-  const device = await adapter.requestDevice();
+  const wantTiming = params.get('timing') === '1';
+  const timingSupported = wantTiming && adapter.features?.has?.('timestamp-query');
+  const device = await adapter.requestDevice({
+    requiredFeatures: timingSupported ? ['timestamp-query'] : [],
+  });
   device.addEventListener('uncapturederror', (e) => fatal(e.error.message));
   device.lost.then((info) => {
     if (info.reason !== 'destroyed') fatal(`WebGPU device lost: ${info.message}`);
@@ -115,6 +119,13 @@ async function init() {
     vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
     device: adapter.info?.device, description: adapter.info?.description,
   }));
+  status.gpuTiming = {
+    requested: wantTiming,
+    supported: timingSupported,
+    frames: 0,
+    sums: {},
+    latest: {},
+  };
 
   // Headless WebGPU builds can lose the device when a canvas surface is
   // configured; ?nocanvas=1 renders offscreen only (read via capture()).
@@ -214,12 +225,16 @@ async function init() {
   let tex = null;
   let reservoirBufA = null, reservoirBufB = null;
   let rw = 0, rh = 0;
+  const textureForView = new WeakMap();
 
   function makeTex(label, format) {
-    return device.createTexture({
+    const texture = device.createTexture({
       label, format, size: [rw, rh],
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
-    }).createView();
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+    });
+    const view = texture.createView();
+    textureForView.set(view, texture);
+    return view;
   }
 
   function recreateTargets() {
@@ -265,6 +280,17 @@ async function init() {
   let prevViewProj = null;
   let prevCamPos = [...camera.pos];
   let frame = 0;
+  const timingWarmup = parseInt(params.get('timewarmup') || '4', 10);
+  const maxTimingQueries = 32;
+  const timingQuerySet = timingSupported
+    ? device.createQuerySet({ type: 'timestamp', count: maxTimingQueries })
+    : null;
+  const timingResolveBuf = timingSupported
+    ? device.createBuffer({
+        size: maxTimingQueries * 8,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      })
+    : null;
 
   function writeUniforms(time) {
     const { viewProj, invViewProj } = camera.matrices(rw / rh);
@@ -387,7 +413,42 @@ async function init() {
   // not composited in some headless environments, so this reads the rendered
   // image straight off the GPU) ---------------------------------------------
   let lastParity = 0;
-  status.capture = async () => {
+  function bytesToBase64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    return btoa(bin);
+  }
+
+  function halfToFloat(h) {
+    const s = (h & 0x8000) ? -1 : 1;
+    const e = (h >> 10) & 0x1f;
+    const f = h & 0x03ff;
+    if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+    if (e === 31) return f ? NaN : s * Infinity;
+    return s * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+
+  async function readTextureBytes(view, bytesPerPixel) {
+    const texture = textureForView.get(view);
+    if (!texture) throw new Error('capture texture is missing');
+    const bpr = Math.ceil((rw * bytesPerPixel) / 256) * 256;
+    const buf = device.createBuffer({
+      size: bpr * rh,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture }, { buffer: buf, bytesPerRow: bpr }, [rw, rh]);
+    device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const bytes = new Uint8Array(buf.getMappedRange()).slice();
+    buf.unmap();
+    buf.destroy();
+    return { bytes, bpr };
+  }
+
+  status.capture = async (opts = {}) => {
     const target = device.createTexture({
       format: canvasFormat, size: [rw, rh],
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
@@ -435,18 +496,41 @@ async function init() {
         rgb[j++] = img.data[i * 4 + 1];
         rgb[j++] = img.data[i * 4 + 2];
       }
-      let bin = '';
-      for (let i = 0; i < rgb.length; i += 8192) {
-        bin += String.fromCharCode.apply(null, rgb.subarray(i, i + 8192));
-      }
-      rgbB64 = btoa(bin);
+      rgbB64 = bytesToBase64(rgb);
     }
-    return {
+
+    const out = {
       png: c2.toDataURL('image/png'),
       rgb: rgbB64,
       mean, std: Math.sqrt(Math.max(0, sum2 / n - mean * mean)),
       w: rw, h: rh,
     };
+    if (opts.hdr) {
+      const finalView = denoiseOn ? tex.denoise[0] : tex.accum[lastParity];
+      const [{ bytes: illum, bpr: illumBpr }, { bytes: alb, bpr: albBpr }] = await Promise.all([
+        readTextureBytes(finalView, 8),
+        readTextureBytes(tex.albedo, 4),
+      ]);
+      const hdr = new Float32Array(rw * rh * 3);
+      for (let y = 0, j = 0; y < rh; y++) {
+        for (let x = 0; x < rw; x++) {
+          const hi = y * illumBpr + x * 8;
+          const ai = y * albBpr + x * 4;
+          const ir = halfToFloat(illum[hi] | (illum[hi + 1] << 8));
+          const ig = halfToFloat(illum[hi + 2] | (illum[hi + 3] << 8));
+          const ib = halfToFloat(illum[hi + 4] | (illum[hi + 5] << 8));
+          const ar = alb[ai] / 255;
+          const ag = alb[ai + 1] / 255;
+          const ab = alb[ai + 2] / 255;
+          hdr[j++] = ir * ar * ar;
+          hdr[j++] = ig * ag * ag;
+          hdr[j++] = ib * ab * ab;
+        }
+      }
+      out.hdr = bytesToBase64(new Uint8Array(hdr.buffer));
+      out.hdrFormat = 'rgb-f32le-linear';
+    }
+    return out;
   };
 
   // --- Hotkeys -------------------------------------------------------------
@@ -492,9 +576,30 @@ async function init() {
       const bg = frameBindGroups(parity);
       const enc = device.createCommandEncoder();
       const wg = [Math.ceil(rw / 8), Math.ceil(rh / 8)];
+      const timingPasses = [];
+      let timingQuery = 0;
+      let timingReadBuf = null;
+      const frameForTiming = frame;
+
+      const passDesc = (label) => {
+        if (!timingSupported || timingQuery + 1 >= maxTimingQueries) {
+          return { label };
+        }
+        const begin = timingQuery++;
+        const end = timingQuery++;
+        timingPasses.push({ label, begin, end });
+        return {
+          label,
+          timestampWrites: {
+            querySet: timingQuerySet,
+            beginningOfPassWriteIndex: begin,
+            endOfPassWriteIndex: end,
+          },
+        };
+      };
 
       const compute = (label, pipeline, group) => {
-        const pass = enc.beginComputePass({ label });
+        const pass = enc.beginComputePass(passDesc(label));
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, group);
         pass.dispatchWorkgroups(wg[0], wg[1]);
@@ -515,6 +620,7 @@ async function init() {
 
       if (ctx) {
         const rp = enc.beginRenderPass({
+          ...passDesc('present'),
           colorAttachments: [{
             view: ctx.getCurrentTexture().createView(),
             loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -526,7 +632,38 @@ async function init() {
         rp.end();
       }
 
+      if (timingSupported && timingQuery > 0) {
+        timingReadBuf = device.createBuffer({
+          size: timingQuery * 8,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        enc.resolveQuerySet(timingQuerySet, 0, timingQuery, timingResolveBuf, 0);
+        enc.copyBufferToBuffer(timingResolveBuf, 0, timingReadBuf, 0, timingQuery * 8);
+      }
+
       device.queue.submit([enc.finish()]);
+      if (timingReadBuf) {
+        timingReadBuf.mapAsync(GPUMapMode.READ).then(() => {
+          const raw = new BigUint64Array(timingReadBuf.getMappedRange());
+          const latest = {};
+          for (const p of timingPasses) {
+            const deltaNs = raw[p.end] > raw[p.begin] ? raw[p.end] - raw[p.begin] : 0n;
+            latest[p.label] = Number(deltaNs) / 1e6;
+          }
+          status.gpuTiming.latest = latest;
+          if (frameForTiming >= timingWarmup) {
+            for (const [label, ms] of Object.entries(latest)) {
+              status.gpuTiming.sums[label] = (status.gpuTiming.sums[label] || 0) + ms;
+            }
+            status.gpuTiming.frames++;
+          }
+          timingReadBuf.unmap();
+          timingReadBuf.destroy();
+        }).catch((e) => {
+          status.gpuTiming.error = String(e);
+          timingReadBuf.destroy();
+        });
+      }
       if (checkErrors) {
         Promise.all([device.popErrorScope(), device.popErrorScope()]).then(([oom, val]) => {
           if (oom) fatal(`out-of-memory: ${oom.message}`);

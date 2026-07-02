@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "npx http-server -p 8080 -c-1 .",
-    "test": "node test/screenshot.mjs"
+    "test": "node test/screenshot.mjs",
+    "bench": "node test/bench.mjs --suite smoke",
+    "bench:ablation": "node test/bench.mjs --suite ablation --resolution 1920x1080 --scale 1 --flip",
+    "bench:convergence": "node test/bench.mjs --suite convergence --resolution 1920x1080 --scale 1 --flip"
   },
   "devDependencies": {
     "playwright": "^1.49.0"
