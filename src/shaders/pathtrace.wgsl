@@ -70,21 +70,59 @@ fn sampleLightFace() -> LightPoint {
   return lp;
 }
 
-// Direct emissive light at a path vertex via one light-list sample
-// (full, non-demodulated contribution; used at secondary vertices).
-fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>) -> vec3<f32> {
+// Emissive-NEE RIS candidate budget at bounce k (primary hit = bounce 0).
+// Fixed at the historical 4 (primary) / 1 (secondary) split unless
+// RF_ADAPTCAND is set, in which case the primary-hit budget grows
+// logarithmically with the scene's light-face count (u.params2.y), scaled by
+// the ?candscale= knob (u.params5.y), and halves per bounce — the analog of
+// the paper's 32/2^k schedule (Lin 2026 §6.1/§7):
+//   N0 = clamp(round(candscale * 4 * (1 + log2(1 + lights/256))), 1, 16)
+//   Nk = max(1, N0 >> k)
+// N depends only on uniforms, so candidate loops stay uniform control flow.
+fn emissiveCandCount(bounce : u32) -> u32 {
+  if (!rflag(RF_ADAPTCAND)) { return select(1u, 4u, bounce == 0u); }
+  let n0 = clamp(round(u.params5.y * 4.0 * (1.0 + log2(1.0 + f32(u.params2.y) / 256.0))), 1.0, 16.0);
+  return max(u32(n0) >> min(bounce, 31u), 1u);
+}
+
+// Direct emissive light at a path vertex: RIS over nCand light-list samples
+// (full, non-demodulated contribution; used at secondary vertices). Target
+// p-hat = lum(f); each candidate carries v = f/pdfA and resampling weight
+// lum(f)/(M*pdfA) = lum(v)/M, so the estimator V(y)*v_y*wSum/lum(v_y) is
+// unbiased for any M; one shadow ray on the survivor only. At M = 1 this
+// reduces exactly (values and RNG stream) to the plain one-sample estimate.
+fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>, nCand : u32) -> vec3<f32> {
   if (u.params2.y == 0u) { return vec3<f32>(0.0); }
-  let lp = sampleLightFace();
   let surf = pos + n * 1e-3;
-  let d = lp.pos - surf;
-  let r2 = max(dot(d, d), 1e-6);
-  let dir = d * inverseSqrt(r2);
-  let cos1 = dot(n, dir);
-  let cos2 = dot(lp.n, -dir);
-  if (cos1 <= 0.0 || cos2 <= 0.0) { return vec3<f32>(0.0); }
-  let r = sqrt(r2);
-  if (traceShadow(surf, dir, r - 2e-3)) { return vec3<f32>(0.0); }
-  return albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
+  let invM = 1.0 / f32(nCand);
+  var wSum = 0.0;
+  var sel = vec3<f32>(0.0);   // f/pdfA of the selected candidate
+  var selLum = 0.0;
+  var selDir = vec3<f32>(0.0);
+  var selR2 = 0.0;
+  for (var k = 0u; k < nCand; k++) {
+    let lp = sampleLightFace();
+    let d = lp.pos - surf;
+    let r2 = max(dot(d, d), 1e-6);
+    let dir = d * inverseSqrt(r2);
+    let cos1 = dot(n, dir);
+    let cos2 = dot(lp.n, -dir);
+    if (cos1 <= 0.0 || cos2 <= 0.0) { continue; }
+    let v = albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
+    let w = lum(v) * invM;
+    if (w <= 0.0) { continue; }
+    let first = wSum == 0.0;
+    wSum += w;
+    // The first valid candidate wins with probability 1: skipping its rand()
+    // keeps the RNG stream identical to the pre-adaptive path when M = 1.
+    if (first || rand() * wSum < w) {
+      sel = v; selLum = lum(v); selDir = dir; selR2 = r2;
+    }
+  }
+  if (wSum <= 0.0) { return vec3<f32>(0.0); }
+  let r = sqrt(selR2);
+  if (traceShadow(surf, selDir, r - 2e-3)) { return vec3<f32>(0.0); }
+  return sel * (wSum / selLum);
 }
 
 // Outgoing radiance Lo(x2 -> x1) estimated by continuing the path from x2.
@@ -111,7 +149,7 @@ fn estimateLo(x2 : vec3<f32>, n2In : vec3<f32>, mat2 : Material, unified : bool)
       Lo += tp * mat.albedo * INV_PI * ndl * u.sunRadiance.rgb;
     }
     if (unified) {
-      Lo += tp * emissiveNEE(pos, n, mat.albedo);
+      Lo += tp * emissiveNEE(pos, n, mat.albedo, emissiveCandCount(v));
     }
     if (v == nBounces) { break; }
 
@@ -254,14 +292,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
   }
 
-  // Candidate: light-list NEE at x1, RIS over 4 emissive faces (§6.1).
+  // Candidate: light-list NEE at x1, RIS over emissiveCandCount(0) emissive
+  // faces (§6.1) — 4 fixed, or the adaptive budget under RF_ADAPTCAND.
   if (unified && u.params2.y > 0u) {
+    let nCand = emissiveCandCount(0u);
     var eSum = 0.0;
     var eSel : Sample;
     eSel.kind = SK_NONE;
     var eSelP = 0.0;
     var eSelPdf = 1.0;
-    for (var k = 0u; k < 4u; k++) {
+    for (var k = 0u; k < nCand; k++) {
       let lp = sampleLightFace();
       var s : Sample;
       s.kind = SK_POINT;
@@ -269,7 +309,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       s.n = lp.n;
       s.rad = lp.Le;
       let p = evalTarget(s, x1, n1);
-      let w = p / (4.0 * lp.pdfA);
+      // 1/M term of the RIS weight uses the ACTUAL candidate count so the
+      // resampled estimator stays unbiased for any budget.
+      let w = p / (f32(nCand) * lp.pdfA);
       if (w > 0.0) {
         eSum += w;
         if (rand() * eSum < w) { eSel = s; eSelP = p; }
