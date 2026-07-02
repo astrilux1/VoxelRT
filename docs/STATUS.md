@@ -49,6 +49,26 @@
   <0.2%); real-time rows keep their operating point and share a
   truncation floor that cancels in ours-vs-lin ratios. The old
   interior/exterior `_b2` reference caches are invalid — delete them.
+- **Benchmark operating point moved to bounces=6** (bounces=2 left a ~15%
+  truncation floor that compressed all FLIP differences; at b6 the floor
+  is ~1.3% and Russian roulette keeps the cost moderate).
+- **Voxel-exact receiver reconstruction landed (big win for everyone).**
+  Reuse passes reconstructed x1 as centerRay × jittered-depth — off the
+  true surface at edges, wobbling per frame. Bisection showed RF_FULLV's
+  canonical visibility retest false-firing on it was the ENTIRE
+  lin-vs-ours quality gap. `receiverPoint()` (restir.wgsl) intersects the
+  reconstruction ray with the voxel grid plane recovered by rounding the
+  dominant-axis coordinate: exact, frame-stable. Interior static 64f/b6
+  FLIP: lin 0.1825→0.1321, ours 0.2044→0.1349, ours+adaptcand+lightgrid
+  0.1952→0.1248 (now beats lin at equal frames; equal-time pending the
+  convergence curves).
+- Equal-frame keep/kill so far (interior, b6, 64f): `adaptcand` and
+  `lightgrid` each help (~3%, more together); `rclamp` is a no-op (clamp
+  never fires at these budgets); `lightpower` is a no-op in THIS scene
+  (homogeneous strip — heterogeneous-lights scene variant in progress on
+  `feature/lamps-scene`); `mixsigma` slightly negative in static so far;
+  `mutate`-for-dupmap neutral in static (its case is motion artifacts +
+  zero converged bias, confirmed to 4 decimals).
 
 Working notes for whoever picks this up next. Read alongside
 `docs/lin2026-restirptenhanced.pdf` (Lin, Kettunen, Wyman — "ReSTIR PT
