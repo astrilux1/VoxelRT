@@ -77,6 +77,22 @@ Deterministic bench hooks: `?benchmove=`
 (frame-indexed strafe), `?stopat=`, `?fseed=`, raw RGB capture
 (`__voxelrt.capture().rgb`).
 
+## RF_CONFDENOISE implemented (feature/confdenoise, 2026-07-01)
+
+Reservoir-confidence-driven denoiser control (`?confdenoise=1`, knob
+`?confk=`, default 1). A per-pixel quality signal
+`q = clamp(c/(2*cCap),0,1) * (1 - dupScore)` is computed in
+`reuse_spatial.wgsl` from the post-spatial reservoir confidence and the
+previous frame's duplication map, and carried in the radiance texture's
+alpha channel (previously a constant 1.0 nothing read — no new targets).
+`temporal.wgsl` caps history at `maxhist * mix(0.125, 1, q)`;
+`atrous.wgsl` scales its luminance sigma by `1 + confk*(1-q)` on top of the
+existing history relaxation. Both are additionally gated on a new host
+"denoise active" uniform bit (params0.z bit 1), so with `denoise=0` the
+output is **bit-identical** flag on vs off (verified: 8-frame 1080p HDR
+readbacks byte-equal). Presented-path axis only; measure per
+RESEARCH_LOOP.md on denoised results at low frame budgets under motion.
+
 ## Energy loss in `ours`: candidate fix landed, needs converged confirmation
 
 Bias validation (long-converged `ours` vs long-converged `base` at the same

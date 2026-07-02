@@ -351,7 +351,10 @@ async function init() {
     f32.set([...prevCamPos, 0], 36);
     f32.set([...sunDir, Math.cos(0.03)], 40);          // ~1.7° angular radius
     f32.set([5.0, 4.5, 3.8, 1.0], 44);                 // sun irradiance, sky intensity
-    u32.set([frame + tuning.fseed, bounces, temporalOn ? 1 : 0, 0], 48);
+    // params0.z: bit 0 = temporal accumulation, bit 1 = denoise active (lets
+    // presented-path-only features, e.g. confdenoise, no-op when denoise=0).
+    u32.set([frame + tuning.fseed, bounces,
+      (temporalOn ? 1 : 0) | (denoiseOn ? 2 : 0), 0], 48);
     f32.set([rw, rh, exposure, 0], 52);
     u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
@@ -407,6 +410,7 @@ async function init() {
         { binding: 8, resource: tex.direct },
         { binding: 9, resource: { buffer: reservoirBufB } },
         { binding: 10, resource: { buffer: brickMaskBuf } },
+        { binding: 12, resource: tex.dup },   // prev-frame dup score (confdenoise q)
         { binding: 13, resource: { buffer: pairingBuf } },
       ],
     });
@@ -444,6 +448,7 @@ async function init() {
         { binding: 4, resource: gCur },
         { binding: 5, resource: dst },
         { binding: 6, resource: { buffer: pbuf } },
+        { binding: 7, resource: tex.radiance },   // q in alpha (confdenoise)
       ],
     }));
     const finalTex = denoiseOn ? tex.denoise[0] : aCur;
