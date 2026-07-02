@@ -17,7 +17,38 @@
 - Five features implemented in parallel on branches `feature/mixsigma`,
   `feature/adaptcand`, `feature/confdenoise`, `feature/lightgrid`,
   `feature/mutate` (flag bits 8192..131072, params5/params6 slots — see
-  common.wgsl). Keep/kill by equal-time FLIP per docs/RESEARCH_LOOP.md.
+  common.wgsl), all merged into `research/voxel-restir-2x`. Keep/kill by
+  equal-time FLIP per docs/RESEARCH_LOOP.md.
+- **Conditional-mean energy inflation found and fixed (the real Phase-1
+  bug).** Null reservoirs (failed initial sampling, null history/neighbors)
+  were dropped from the reuse MIS instead of counting as zero-valued
+  outcomes with confidence, so reservoir chains converged to
+  E[w | sample found] = E[w]/(1-q): **+165% in `gi`** (its only candidate is
+  the bounce path, which often lands on dark surfaces), +4% in `lin`/`ours`.
+  Diagnosed by converged bisection: inflation was a step function of any
+  confidence accumulation (identical at cCap=1/5/20, clean at 0), a
+  never-adopt variant was clean, and zero-jitter changed nothing. Fix:
+  pathtrace always writes c=1 (even for null outcomes); the temporal merge
+  keeps null history in the partition and writes pooled-confidence nulls;
+  the spatial pass separates *domains* (all validated neighbors + canonical,
+  null or not — they normalize the balance heuristic and pool into output
+  confidence) from *candidates* (non-null, footprint-passing only).
+  Post-fix: converged `gi` temporal-only went from +165% to −0.3%.
+- **Reference bounce truncation found and fixed.** `base&bounces=2`
+  references are ~15% dark in this interior (converged means: b3 +8.5% R
+  over the b2 ref, b4 +12.7, b6 +16.3, b8 +17.3, b10 +17.6 — the series is
+  still moving at b10). Worse, NEE-unified estimators capture one extra
+  emissive path segment per bounce count than the hit-based baseline, so
+  unified-vs-base comparisons at equal `bounces` carried a truncation
+  mismatch masquerading as estimator bias (the post-null-fix "+3.4% R"
+  in `gi&unified` decomposed into exactly this: an inline-NEE probe
+  matched the reservoir path bit-for-bias, spatially uniform +12%
+  relative excess, and base(b3) overshot it). References now default to
+  `--ref-bounces 12` (cached under `_rb12` stems); estimator-correctness
+  checks run configs at bounces=8 against it (residual depth mismatch
+  <0.2%); real-time rows keep their operating point and share a
+  truncation floor that cancels in ours-vs-lin ratios. The old
+  interior/exterior `_b2` reference caches are invalid — delete them.
 
 Working notes for whoever picks this up next. Read alongside
 `docs/lin2026-restirptenhanced.pdf` (Lin, Kettunen, Wyman — "ReSTIR PT
