@@ -205,6 +205,20 @@ async function init() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(lightAliasBuf, 0, scene.lightAlias);
+  // Per-brick-cell top-K light table (RF_LIGHTGRID), built once on the CPU.
+  const lightGridBuf = device.createBuffer({
+    label: 'lightGrid', size: scene.lightGrid.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(lightGridBuf, 0, scene.lightGrid);
+  status.lightGrid = {
+    buildMs: scene.lightGridMs,
+    bytes: scene.lightGrid.byteLength,
+    lights: scene.lightCount,
+  };
+  console.log(`light grid: ${scene.lightCount} lights, ` +
+    `${(scene.lightGrid.byteLength / (1024 * 1024)).toFixed(2)} MB, ` +
+    `built in ${scene.lightGridMs.toFixed(1)} ms`);
 
   // Self-inverting Gaussian pairing textures for paired spatial reuse.
   // With RF_MIXSIGMA the wide-σ tap lives in texture 0 — the largest (254²),
@@ -391,6 +405,7 @@ async function init() {
         { binding: 8, resource: tex.direct },
         { binding: 9, resource: { buffer: lightAliasBuf } },
         { binding: 10, resource: { buffer: brickMaskBuf } },
+        { binding: 11, resource: { buffer: lightGridBuf } },
       ],
     });
     const tr = device.createBindGroup({
