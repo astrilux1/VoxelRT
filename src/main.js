@@ -129,9 +129,18 @@ async function init() {
   if (!adapter) throw new Error('No WebGPU adapter found.');
   const wantTiming = params.get('timing') === '1';
   const timingSupported = wantTiming && adapter.features?.has?.('timestamp-query');
-  const device = await adapter.requestDevice({
-    requiredFeatures: timingSupported ? ['timestamp-query'] : [],
-  });
+  // fp32 accumulation: fp16 running means quantize past ~1000 frames (history
+  // rides in alpha and integers >2048 aren't even representable), which drifts
+  // long converged references. Filterable fp32 is required because temporal
+  // reprojection samples the history bilinearly.
+  const accumF32 = adapter.features?.has?.('float32-filterable');
+  const accumFormat = accumF32 ? 'rgba32float' : 'rgba16float';
+  if (!accumF32) console.warn('float32-filterable unavailable: fp16 accumulation, long references will drift');
+  const requiredFeatures = [
+    ...(timingSupported ? ['timestamp-query'] : []),
+    ...(accumF32 ? ['float32-filterable'] : []),
+  ];
+  const device = await adapter.requestDevice({ requiredFeatures });
   device.addEventListener('uncapturederror', (e) => fatal(e.error.message));
   device.lost.then((info) => {
     if (info.reason !== 'destroyed') fatal(`WebGPU device lost: ${info.message}`);
@@ -224,7 +233,8 @@ async function init() {
       makeModule(device, 'reuse_temporal', common + restirLib + (await loadShader('reuse_temporal.wgsl'))),
       makeModule(device, 'reuse_spatial', common + restirLib + voxelLib + (await loadShader('reuse_spatial.wgsl'))),
       makeModule(device, 'dupmap', common + restirLib + (await loadShader('dupmap.wgsl'))),
-      makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))),
+      makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))
+        .replace('texture_storage_2d<rgba16float, write>', `texture_storage_2d<${accumFormat}, write>`)),
       makeModule(device, 'atrous', common + (await loadShader('atrous.wgsl'))),
       makeModule(device, 'present', await loadShader('present.wgsl')),
     ]);
@@ -284,7 +294,7 @@ async function init() {
       dup: makeTex('dup', 'r32float'),
       albedo: makeTex('albedo', 'rgba8unorm'),
       gbuf: [makeTex('gbufA', 'rgba32float'), makeTex('gbufB', 'rgba32float')],
-      accum: [makeTex('accumA', 'rgba16float'), makeTex('accumB', 'rgba16float')],
+      accum: [makeTex('accumA', accumFormat), makeTex('accumB', accumFormat)],
       denoise: [makeTex('denoiseA', 'rgba16float'), makeTex('denoiseB', 'rgba16float')],
     };
     // Reservoirs: 32 bytes per pixel; A = working set (initial + temporal),
@@ -547,18 +557,25 @@ async function init() {
     };
     if (opts.hdr) {
       const finalView = denoiseOn ? tex.denoise[0] : tex.accum[lastParity];
+      // Accumulation may be fp32 (see accumFormat); the denoise chain stays fp16.
+      const f32Illum = !denoiseOn && accumF32;
+      const illumStride = f32Illum ? 16 : 8;
       const [{ bytes: illum, bpr: illumBpr }, { bytes: alb, bpr: albBpr }] = await Promise.all([
-        readTextureBytes(finalView, 8),
+        readTextureBytes(finalView, illumStride),
         readTextureBytes(tex.albedo, 4),
       ]);
+      const illumDv = new DataView(illum.buffer, illum.byteOffset, illum.byteLength);
       const hdr = new Float32Array(rw * rh * 3);
       for (let y = 0, j = 0; y < rh; y++) {
         for (let x = 0; x < rw; x++) {
-          const hi = y * illumBpr + x * 8;
+          const hi = y * illumBpr + x * illumStride;
           const ai = y * albBpr + x * 4;
-          const ir = halfToFloat(illum[hi] | (illum[hi + 1] << 8));
-          const ig = halfToFloat(illum[hi + 2] | (illum[hi + 3] << 8));
-          const ib = halfToFloat(illum[hi + 4] | (illum[hi + 5] << 8));
+          const ir = f32Illum ? illumDv.getFloat32(hi, true)
+            : halfToFloat(illum[hi] | (illum[hi + 1] << 8));
+          const ig = f32Illum ? illumDv.getFloat32(hi + 4, true)
+            : halfToFloat(illum[hi + 2] | (illum[hi + 3] << 8));
+          const ib = f32Illum ? illumDv.getFloat32(hi + 8, true)
+            : halfToFloat(illum[hi + 4] | (illum[hi + 5] << 8));
           const ar = alb[ai] / 255;
           const ag = alb[ai + 1] / 255;
           const ab = alb[ai + 2] / 255;
