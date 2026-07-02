@@ -33,7 +33,8 @@ let sunElevation = 0.85;
 const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
-  lightpower: 4096,
+  lightpower: 4096, mixsigma: 8192, adaptcand: 16384, confdenoise: 32768,
+  lightgrid: 65536, mutate: 131072,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
@@ -67,6 +68,12 @@ const tuning = {
   clamp: parseFloat(params.get('rclampv') || '24'),
   maxhist: parseFloat(params.get('maxhist') || '64'),
   fseed: parseInt(params.get('fseed') || '0', 10),
+  // Slots pre-allocated for flag-gated experiments (params5/params6).
+  sigma2: parseFloat(params.get('sigma2') || '48'),      // mixsigma: wide tap σ (px)
+  candscale: parseFloat(params.get('candscale') || '1'), // adaptcand: budget scale
+  confk: parseFloat(params.get('confk') || '1'),         // confdenoise: strength
+  mutscale: parseFloat(params.get('mutscale') || '0.5'), // mutate: proposal scale
+  gridcand: parseFloat(params.get('gridcand') || '8'),   // lightgrid: cell candidates
 };
 // Deterministic camera strafe for benchmarking temporal behavior, and an
 // exact frame count to halt at so captures land on a reproducible pose.
@@ -174,7 +181,7 @@ async function init() {
   device.queue.writeBuffer(brickMaskBuf, 0, scene.brickMasks);
 
   const uniformBuf = device.createBuffer({
-    label: 'uniforms', size: 272,
+    label: 'uniforms', size: 304,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -302,7 +309,7 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
-  const uniformData = new ArrayBuffer(272);
+  const uniformData = new ArrayBuffer(304);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
   let prevViewProj = null;
@@ -339,6 +346,8 @@ async function init() {
     u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
     f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
+    f32.set([tuning.sigma2, tuning.candscale, tuning.confk, tuning.mutscale], 68);
+    f32.set([tuning.gridcand, 0, 0, 0], 72);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];
