@@ -176,8 +176,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (!found) { return; }
 
   let prevIdx = u32(prevPix.y) * dims.x + u32(prevPix.x);
+  // A null history still participates in the merge (with pT = 0): both the
+  // fresh and the history technique must count their zero-valued outcomes,
+  // or the chain converges to the conditional mean E[w | sample found] and
+  // inflates energy by 1/(1-q) (measured +165% in `gi`). Null reservoirs
+  // carry pooled confidence for exactly this purpose.
   let st = unpackReservoir(reservoirsB[prevIdx]);
-  if (st.kind == SK_NONE) { return; }
 
   // Duplication score at the reprojected pixel — shared lookup for the
   // adaptive cCap (§5) and the RF_MUTATE trigger (the dupmap pass is
@@ -205,7 +209,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let wC = (cC / mDen) * pC * max(sc.W, 0.0);
   let wT = (cT / mDen) * pT * max(st.W, 0.0);
   let wSum = wC + wT;
-  if (wSum <= 0.0) { return; }
+  if (wSum <= 0.0) {
+    // Pooled null: no candidate survives, but the merged confidence must —
+    // it is what down-weights lucky samples against the zero outcomes.
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = cC + cT;
+    reservoirsA[pixIdx] = packReservoir(nullOut);
+    return;
+  }
 
   var sel = sc;
   var selP = pC;

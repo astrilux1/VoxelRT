@@ -141,17 +141,29 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let tPrim = g.w;
   let cosView = max(dot(n1, normalize(u.camPos.xyz - x1)), 0.0);
 
-  // Gather candidates: canonical + up to 3 spatial neighbors.
+  // Reuse domains vs candidates: the canonical pixel plus every *validated*
+  // neighbor is a technique domain, even when its reservoir is null or its
+  // sample fails the footprint criterion. A null reservoir is a zero-valued
+  // outcome of that domain's sampling — its confidence must stay in the MIS
+  // denominators and in the pooled output confidence, or resampling
+  // converges to the conditional mean E[w | sample found] and inflates
+  // energy by 1/(1-q) (measured +165% in `gi`, +4% unified).
+  var domX1 : array<vec3<f32>, 4>;
+  var domN1 : array<vec3<f32>, 4>;
+  var domC  : array<f32, 4>;
+  var nDom = 0u;
   var cand : array<Sample, 4>;
-  var candX1 : array<vec3<f32>, 4>;
-  var candN1 : array<vec3<f32>, 4>;
+  var candDom : array<u32, 4>;
   var nCand = 0u;
 
   let canonical = unpackReservoir(reservoirsA[pixIdx]);
+  domX1[0] = x1;
+  domN1[0] = n1;
+  domC[0] = canonical.c;
+  nDom = 1u;
   if (canonical.kind != SK_NONE) {
     cand[0] = canonical;
-    candX1[0] = x1;
-    candN1[0] = n1;
+    candDom[0] = 0u;
     nCand = 1u;
   }
 
@@ -199,21 +211,34 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       if (!ok) { continue; }
 
       let rq = unpackReservoir(reservoirsA[u32(q.y) * dims.x + u32(q.x)]);
-      if (rq.kind == SK_NONE) { continue; }
-      if (rflag(RF_FOOTPRINT) && !footprintOK(rq, x1, n1, tPrim, cosView)) { continue; }
-
-      cand[nCand] = rq;
-      candX1[nCand] = x1q;
-      candN1[nCand] = gq.xyz;
-      nCand++;
+      // The validated neighbor is a domain regardless of what its reservoir
+      // holds; it contributes a candidate only if the sample exists and its
+      // reconnection passes the footprint criterion.
+      domX1[nDom] = x1q;
+      domN1[nDom] = gq.xyz;
+      domC[nDom] = rq.c;
+      if (rq.kind != SK_NONE &&
+          (!rflag(RF_FOOTPRINT) || footprintOK(rq, x1, n1, tPrim, cosView))) {
+        cand[nCand] = rq;
+        candDom[nCand] = nDom;
+        nCand++;
+      }
+      nDom++;
     }
   }
 
+  var cTotal = 0.0;
+  for (var l = 0u; l < nDom; l++) { cTotal += domC[l]; }
+
   if (nCand == 0u) {
-    // Empty reservoir: zero confidence when the quality signal is active.
+    // Pooled null: keep the domains' confidence so downstream merges keep
+    // counting these zero outcomes. Zero quality when the signal is active.
     textureStore(radianceOut, pix,
       vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
-    reservoirsB[pixIdx] = emptyReservoir();
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = min(cTotal, 255.0);
+    reservoirsB[pixIdx] = packReservoir(nullOut);
     return;
   }
 
@@ -229,18 +254,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   sel.kind = SK_NONE;
   var selP = 0.0;
   var selJ = 0u;
-  var cTotal = 0.0;
 
   for (var j = 0u; j < nCand; j++) {
     let s = cand[j];
-    cTotal += s.c;
 
+    // Balance heuristic over ALL domains (null ones included): a domain
+    // that produced nothing this round still normalizes the partition.
     var denom = 0.0;
-    for (var l = 0u; l < nCand; l++) {
-      denom += cand[l].c * evalTarget(s, candX1[l], candN1[l]);
+    for (var l = 0u; l < nDom; l++) {
+      denom += domC[l] * evalTarget(s, domX1[l], domN1[l]);
     }
     if (denom <= 0.0) { continue; }
-    let m = cand[j].c * evalTarget(s, candX1[j], candN1[j]) / denom;
+    let dj = candDom[j];
+    let m = domC[dj] * evalTarget(s, domX1[dj], domN1[dj]) / denom;
 
     let pMe = evalTarget(s, x1, n1);
     let w = m * pMe * max(s.W, 0.0);
@@ -261,10 +287,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   if (sel.kind == SK_NONE || selP <= 0.0 || wSum <= 0.0) {
-    // Resampling failed: zero confidence when the quality signal is active.
+    // Resampling failed: pooled null (see above) + zero quality signal.
     textureStore(radianceOut, pix,
       vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
-    reservoirsB[pixIdx] = emptyReservoir();
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = min(cTotal, 255.0);
+    reservoirsB[pixIdx] = packReservoir(nullOut);
     return;
   }
 

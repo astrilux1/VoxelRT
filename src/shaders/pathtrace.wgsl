@@ -371,9 +371,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (sel.kind != SK_NONE && selP > 0.0) {
     out = sel;
     out.W = wSum / selP;
-    out.c = 1.0;
-    out.seed = pcgHash(pixIdx + u.params0.x * (dims.x * dims.y + 1u));
   }
+  // A failed initial sample still carries confidence 1: it is a *zero-valued
+  // outcome* of the canonical technique, not a missing technique. Dropping it
+  // from the reuse MIS makes the reservoir chain converge to the conditional
+  // mean E[wSum | sample found] — a 1/(1-q) energy inflation (measured +165%
+  // in `gi`, where the sole bounce candidate lands on dark surfaces often).
+  out.c = 1.0;
+  out.seed = pcgHash(pixIdx + u.params0.x * (dims.x * dims.y + 1u));
   reservoirsA[pixIdx] = packReservoir(out);
   textureStore(directOut, pix, vec4<f32>(direct, 1.0));
 }
