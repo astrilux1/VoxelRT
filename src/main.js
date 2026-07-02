@@ -33,6 +33,7 @@ let sunElevation = 0.85;
 const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
+  lightpower: 4096,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
@@ -43,9 +44,9 @@ const PRESETS = {
   lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
         'vector', 'unified'],
   // Ours: Lin 2026 + voxel-exact plane reuse, disocclusion rescue,
-  // per-candidate visibility, reservoir contribution clamp.
+  // per-candidate visibility, reservoir contribution clamp, light power sampling.
   ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
-         'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp'],
+         'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp', 'lightpower'],
 };
 const preset = params.get('preset') || 'ours';
 let restirFlags = (PRESETS[preset] || PRESETS.ours)
@@ -102,6 +103,19 @@ async function makeModule(device, label, code) {
   return module;
 }
 
+function adapterLimits(limits) {
+  return {
+    maxTextureDimension2D: limits.maxTextureDimension2D,
+    maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+    maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,
+    maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup,
+    maxComputeWorkgroupSizeX: limits.maxComputeWorkgroupSizeX,
+    maxComputeWorkgroupSizeY: limits.maxComputeWorkgroupSizeY,
+    maxComputeWorkgroupSizeZ: limits.maxComputeWorkgroupSizeZ,
+    maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension,
+  };
+}
+
 async function init() {
   if (!navigator.gpu) throw new Error('WebGPU is not available in this browser.');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -115,10 +129,14 @@ async function init() {
   device.lost.then((info) => {
     if (info.reason !== 'destroyed') fatal(`WebGPU device lost: ${info.message}`);
   });
-  console.log('adapter:', JSON.stringify({
+  status.adapterInfo = {
     vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
     device: adapter.info?.device, description: adapter.info?.description,
-  }));
+    isFallbackAdapter: adapter.isFallbackAdapter,
+    features: Array.from(adapter.features || []),
+    limits: adapterLimits(adapter.limits),
+  };
+  console.log('adapter:', JSON.stringify(status.adapterInfo));
   status.gpuTiming = {
     requested: wantTiming,
     supported: timingSupported,
@@ -149,6 +167,11 @@ async function init() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(brickBuf, 0, scene.bricks);
+  const brickMaskBuf = device.createBuffer({
+    label: 'brickMasks', size: scene.brickMasks.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(brickMaskBuf, 0, scene.brickMasks);
 
   const uniformBuf = device.createBuffer({
     label: 'uniforms', size: 272,
@@ -161,6 +184,11 @@ async function init() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(lightBuf, 0, scene.lights);
+  const lightAliasBuf = device.createBuffer({
+    label: 'lightAlias', size: scene.lightAlias.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(lightAliasBuf, 0, scene.lightAlias);
 
   // Self-inverting Gaussian pairing textures for paired spatial reuse.
   const pairingData = makePairingBuffer(Math.max(0.8, tuning.sigma));
@@ -333,6 +361,8 @@ async function init() {
         { binding: 6, resource: { buffer: lightBuf } },
         { binding: 7, resource: { buffer: reservoirBufA } },
         { binding: 8, resource: tex.direct },
+        { binding: 9, resource: { buffer: lightAliasBuf } },
+        { binding: 10, resource: { buffer: brickMaskBuf } },
       ],
     });
     const tr = device.createBindGroup({
@@ -357,6 +387,7 @@ async function init() {
         { binding: 7, resource: { buffer: reservoirBufA } },
         { binding: 8, resource: tex.direct },
         { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 10, resource: { buffer: brickMaskBuf } },
         { binding: 13, resource: { buffer: pairingBuf } },
       ],
     });

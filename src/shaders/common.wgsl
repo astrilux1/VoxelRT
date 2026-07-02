@@ -40,6 +40,7 @@ const RF_PLANE     : u32 = 256u;   // ours: exact voxel-plane neighbor validatio
 const RF_RESCUE    : u32 = 512u;   // ours: disocclusion history rescue (3x3 search)
 const RF_FULLV     : u32 = 1024u;  // ours: revalidate canonical visibility when shading
 const RF_CLAMP     : u32 = 2048u;  // ours: reservoir contribution clamp
+const RF_LIGHTPOWER: u32 = 4096u;  // ours: power-sampled emissive light list
 
 fn rflag(bit : u32) -> bool { return (u.params2.x & bit) != 0u; }
 

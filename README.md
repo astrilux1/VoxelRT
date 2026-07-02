@@ -99,10 +99,20 @@ composited in headless mode) and fails on a blank image:
 ```sh
 npm install
 npm test                       # writes test/screenshot.png
-npm run bench                  # tiny HDR benchmark smoke
+npm run bench                  # short 1920x1080 HDR benchmark smoke
 npm run bench:ablation         # 1920x1080 paper-style ablation harness
 npm run bench:convergence      # convergence curves over fixed frame budgets
 ```
+
+Benchmark runs write `test/eval/results.json`, `results.csv`, and
+`summary.csv` with wall/GPU ms per frame, FPS, ms/megapixel, cumulative GPU
+cost, pass percentages, adapter/runtime metadata, and repeat statistics.
+
+On Windows, the test and benchmark harnesses launch Chromium with
+high-performance GPU flags and fail if `nvidia-smi` reports an NVIDIA GPU but
+WebGPU selects a non-NVIDIA adapter. Use `--allow-non-nvidia-gpu` or
+`--allow-software-gpu` only for diagnostic runs that should not be trusted as
+benchmark results.
 
 ## Notes on the demo scene
 

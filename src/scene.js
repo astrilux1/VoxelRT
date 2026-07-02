@@ -28,6 +28,57 @@ const MAT = {
   ceilLight: M(255, 240, 220, 210),
 };
 
+function emissiveFaceWeight(m) {
+  const e = ((m >>> 24) & 0xff) / 255;
+  if (e <= 0) return 0;
+  const r = (m & 0xff) / 255;
+  const g = ((m >>> 8) & 0xff) / 255;
+  const b = ((m >>> 16) & 0xff) / 255;
+  return e * (0.2126 * r * r + 0.7152 * g * g + 0.0722 * b * b);
+}
+
+function makeAliasTable(weights) {
+  const n = weights.length;
+  if (n === 0) return new Float32Array([1, 0, 1, 0]);
+
+  const total = weights.reduce((s, w) => s + Math.max(0, w), 0);
+  const prob = total > 0
+    ? weights.map((w) => Math.max(0, w) / total)
+    : weights.map(() => 1 / n);
+  const scaled = prob.map((p) => p * n);
+  const alias = new Uint32Array(n);
+  const q = new Float32Array(n);
+  const small = [];
+  const large = [];
+
+  for (let i = 0; i < n; i++) {
+    if (scaled[i] < 1) small.push(i);
+    else large.push(i);
+  }
+
+  while (small.length && large.length) {
+    const s = small.pop();
+    const l = large.pop();
+    q[s] = scaled[s];
+    alias[s] = l;
+    scaled[l] = scaled[l] + scaled[s] - 1;
+    if (scaled[l] < 1) small.push(l);
+    else large.push(l);
+  }
+
+  for (const i of large) { q[i] = 1; alias[i] = i; }
+  for (const i of small) { q[i] = 1; alias[i] = i; }
+
+  const table = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    table[i * 4 + 0] = q[i];
+    table[i * 4 + 1] = alias[i];
+    table[i * 4 + 2] = prob[i] > 0 ? prob[i] : 1 / n;
+    table[i * 4 + 3] = 0;
+  }
+  return table;
+}
+
 // Deterministic 2D value noise for the terrain.
 function makeNoise(seed) {
   const hash = (x, y) => {
@@ -169,16 +220,25 @@ export function generateScene(N) {
   // --- Brick occupancy map (built last so carved air is accounted for) -----
   const BG = N / BRICK;
   const bricks = new Uint32Array(BG * BG * BG);
+  const brickMasks = new Uint32Array(BG * BG * BG * 16);
   for (let bz = 0; bz < BG; bz++)
     for (let by = 0; by < BG; by++)
       for (let bx = 0; bx < BG; bx++) {
         let occ = 0;
-        outer:
+        const bi = bx + by * BG + bz * BG * BG;
+        const maskBase = bi * 16;
         for (let z = bz * BRICK; z < (bz + 1) * BRICK; z++)
           for (let y = by * BRICK; y < (by + 1) * BRICK; y++)
             for (let x = bx * BRICK; x < (bx + 1) * BRICK; x++)
-              if (vox[idx(x, y, z)] !== 0) { occ = 1; break outer; }
-        bricks[bx + by * BG + bz * BG * BG] = occ;
+              if (vox[idx(x, y, z)] !== 0) {
+                occ = 1;
+                const lx = x - bx * BRICK;
+                const ly = y - by * BRICK;
+                const lz = z - bz * BRICK;
+                const bit = lx + ly * BRICK + lz * BRICK * BRICK;
+                brickMasks[maskBase + (bit >> 5)] |= (1 << (bit & 31)) >>> 0;
+              }
+        bricks[bi] = occ;
       }
 
   // --- Emissive face list (area lights for NEE / unified ReSTIR) -----------
@@ -187,21 +247,25 @@ export function generateScene(N) {
   // word1 = packed material. Requires N <= 512.
   const faceDirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
   const lightWords = [];
+  const lightWeights = [];
   for (let z = 0; z < N; z++)
     for (let y = 0; y < N; y++)
       for (let x = 0; x < N; x++) {
         const m = vox[idx(x, y, z)];
         if (((m >>> 24) & 0xff) === 0 || m === 0) continue;
+        const w = emissiveFaceWeight(m);
         for (let f = 0; f < 6; f++) {
           const [dx, dy, dz] = faceDirs[f];
           const nx = x + dx, ny = y + dy, nz = z + dz;
           if (!inb(nx, ny, nz) || vox[idx(nx, ny, nz)] === 0) {
             lightWords.push((x | (y << 9) | (z << 18) | (f << 27)) >>> 0, m);
+            lightWeights.push(w);
           }
         }
       }
   const lights = new Uint32Array(lightWords.length ? lightWords : [0, 0]);
   const lightCount = lightWords.length / 2;
+  const lightAlias = makeAliasTable(lightWeights);
 
   // Spawn just outside the doorway, eye height, facing the room (+Z).
   const spawn = {
@@ -214,5 +278,5 @@ export function generateScene(N) {
     pitch: -0.05,
   };
 
-  return { vox, bricks, spawn, worldM, lights, lightCount };
+  return { vox, bricks, brickMasks, spawn, worldM, lights, lightCount, lightAlias };
 }

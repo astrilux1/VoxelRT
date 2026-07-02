@@ -2,7 +2,8 @@
 
 Working notes for whoever picks this up next. Read alongside
 `docs/lin2026-restirptenhanced.pdf` (Lin, Kettunen, Wyman — "ReSTIR PT
-Enhanced", the golden reference for this work).
+Enhanced", the golden reference for this work) and `docs/RESEARCH_LOOP.md`
+for the measurement discipline behind the 2-3x claim.
 
 ## Goal
 
@@ -52,7 +53,13 @@ atrous.wgsl/present  unchanged
   emissive voxel is a sampleable area light (word-packed; `lightCount` in
   uniforms). This is the paper's light-tile RIS analog and makes direct
   emissive lighting (interior scene) dramatically cleaner than
-  path-hit-only sampling.
+  path-hit-only sampling. `ours` now adds an alias table over emitted
+  luminance so bright voxel faces are sampled in proportion to power rather
+  than uniformly.
+- **Brick occupancy masks** (`src/scene.js` + `voxel.wgsl`): each 8³ brick now
+  has a 512-bit occupancy mask, letting DDA skip full voxel-buffer reads for
+  empty cells inside occupied bricks. This is a renderer-wide optimization and
+  is intentionally not part of the `lin`/`ours` technique comparison.
 - **Estimator split**: with unification ON, emission is never picked up on
   bounce hits (pure NEE); with it OFF, the baseline estimator is preserved
   exactly. Both converge to the same integral — this is what the bias check
@@ -65,17 +72,29 @@ flag overrides (`?paired=0` etc.) and tuning knobs (`?taps= sigma= ccap=
 capmin= dupalpha= fpc= rclampv= maxhist=`). `lin` is the faithful adaptation
 of the paper's technique set; `ours` adds (so far): voxel-exact same-plane
 neighbor validation, disocclusion rescue, per-candidate/canonical visibility
-at shading, contribution clamping. Deterministic bench hooks: `?benchmove=`
+at shading, contribution clamping, and emissive-face power sampling.
+Deterministic bench hooks: `?benchmove=`
 (frame-indexed strafe), `?stopat=`, `?fseed=`, raw RGB capture
 (`__voxelrt.capture().rgb`).
 
-## Open issue: energy loss in `ours` (MUST FIX FIRST)
+## Energy loss in `ours`: candidate fix landed, needs converged confirmation
 
 Bias validation (long-converged `ours` vs long-converged `base` at the same
 interior pose, denoiser off, uncapped accumulation, 800 frames, 240×135):
 **`ours` converges ~8–18% darker** (mean RGB 183/132/102 vs 200/152/124,
 PSNR between converged images only 18.3 dB). The image is *clean* (reuse
 works, noise is far lower than base at equal frames) but energy is lost.
+
+2026-07-02 update: the low-res bisection isolated the extra darkening to
+`RF_FULLV` canonical visibility revalidation. The visibility rays were started
+at the receiver's offset surface point but aimed using the unoffset
+`x1 -> target` vector, which can falsely self-occlude point samples. The fix in
+`pathtrace.wgsl` and `reuse_spatial.wgsl` now aims emissive/canonical point
+visibility rays from the actual offset ray origin. At 1920×1080, 4- and
+16-frame smoke ladders no longer show a separate `fullv` energy penalty:
+`lin` vs `lin&fullv=1` and `ours` vs `ours&fullv=0` are essentially tied in
+HDR MSE/mean. This is not yet a final convergence proof; confirm with a
+higher-frame 1920×1080 run before declaring the bias issue fully closed.
 Unranked suspects, in rough order of my confidence:
 
 1. **Contribution clamp default too low** (`rclampv=24` in demodulated
@@ -104,11 +123,11 @@ which is legitimately biased) should match `base` to >30 dB.
 ## Pivot: use the paper's evaluation pipeline (do not reinvent)
 
 The original low-res harness (`test/bench.mjs` at 240×135) was useful for
-correctness/smoke work but is the wrong instrument for the 2–3× claim:
+early correctness work but is the wrong instrument for the 2–3× claim:
 resolution is far below the paper's 1920×1080, wall-clock boot/render timing
 distorts cost ratios, and PSNR-on-tonemapped-8-bit is not their metric. Keep
-small hardware runs for regression/bias checks; do the headline evaluation the
-way the paper does:
+short hardware runs at 1920×1080 for regression/bias checks; do the headline
+evaluation the way the paper does:
 
 1. **Metric: HDR ꟻLIP** (Andersson et al. 2021), which is what Lin 2026
    reports throughout. NVIDIA's reference implementation
@@ -137,24 +156,32 @@ way the paper does:
    *protocol* (FLIP + per-pass timings + ablation rows + convergence plots)
    inside this repo's harness is the pragmatic equivalent and defensible.
 
+The benchmark run line and CSV/JSON now include wall ms/f, wall FPS, GPU ms/f,
+GPU FPS, GPU ms/megapixel, cumulative GPU cost for the frame budget, timed
+frame count, dominant pass and pass percentages. `results.json` also includes
+runtime/adapter context, and `summary.csv` records repeat-aware mean, median,
+stddev, CV, min, p95, and max for wall/GPU cost fields.
+
 ## Suggested order of work
 
 1. Fix the energy loss (bisection above; fix, then re-run the bias check —
    target >30 dB agreement of converged `ours&dupmap=0` vs `base`).
 2. Add/verify HDR (pre-tonemap) readback + ꟻLIP scoring + `timestamp-query`
    per-pass timings to the harness; default benchmark resolution 1920×1080 on
-   hardware, with smaller hardware-only smoke runs for quick checks.
+   hardware, with short 1920×1080 smoke runs for quick checks.
 3. Build the ablation table & convergence curves (protocol above). Tune
    `lin` honestly (σ=16 / R=30 / cCap=20 per paper defaults at 1080p).
 4. Push `ours` past 2–3×: the biggest untapped, voxel-specific levers —
+   - light-list power sampling (implemented behind `RF_LIGHTPOWER`/`?lightpower=`;
+     measure `ours_no_lightpower` vs `ours`);
    - same-plane reuse with *widened* pairing σ (plane-exact validation
      removes the usual blur/bias penalty of long-range reuse);
-   - per-brick 512-bit occupancy masks to cut DDA memory traffic (helps
-     every config, improves absolute ms);
+   - per-brick 512-bit occupancy masks to cut DDA memory traffic (implemented;
+     helps every config, improves absolute ms);
    - reservoir-confidence-driven accumulation/à-trous control (feed `c` and
      dup score into filter strength instead of raw history length);
-   - light-list power sampling (build alias table over face `Le`; current
-     sampling is uniform).
+   - RIS candidate budgets that adapt to light count and receiver/light
+     distance, keeping equal-time comparisons honest.
 5. Update README (pipeline description is now stale), decide VoxelBench's
    fate (recommendation: delete — its own rnd-log documents its techniques
    failing visual review; nothing in `pipeline/` is load-bearing here), and
@@ -169,7 +196,13 @@ way the paper does:
 - `src/shaders/reuse_temporal.wgsl`, `reuse_spatial.wgsl`, `dupmap.wgsl` — new
 - `src/shaders/common.wgsl` — uniforms extended (params2–4), flag bits
 - `src/pairing.js` — pairing texture construction (new)
-- `src/scene.js` — emissive face light list
+- `src/scene.js` — emissive face light list, power-sampling alias table, and
+  per-brick occupancy masks
+- `docs/RESEARCH_LOOP.md` — research/evaluation checklist for defensible
+  equal-time/equal-error claims
 - `src/main.js` — pass orchestration, presets/flags, bench hooks
-- `test/bench.mjs` — headless harness: cached references, PSNR table,
-  `--shot` one-off renders (to be upgraded per the pivot above)
+- `test/bench.mjs` — headless harness: cached HDR references, 1920×1080
+  default smoke/benchmark path, adapter diagnostics, optional HDR-FLIP,
+  per-pass GPU timings when `timestamp-query` is available, richer
+  performance/cost stats, repeat summaries, and `--shot` one-off renders
+- `test/gpu-launch.mjs` — shared Chromium launch/GPU adapter diagnostics

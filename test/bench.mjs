@@ -14,10 +14,17 @@
 import { chromium } from 'playwright';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  assessAdapter,
+  chromiumLaunchOptions,
+  detectNvidiaGpu,
+  getArg,
+  hasFlag,
+} from './gpu-launch.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const EVALDIR = join(ROOT, 'test', 'eval');
@@ -25,11 +32,8 @@ const REFDIR = join(EVALDIR, 'refs');
 const RUNDIR = join(EVALDIR, 'runs');
 const args = process.argv.slice(2);
 
-const hasFlag = (name) => args.includes(name);
-const getArg = (name, dflt) => {
-  const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : dflt;
-};
+const flag = (name) => hasFlag(args, name);
+const arg = (name, dflt) => getArg(args, name, dflt);
 const parseList = (s) => String(s).split(',').map((x) => x.trim()).filter(Boolean);
 const safe = (s) => String(s).replace(/[^a-zA-Z0-9_.-]+/g, '_');
 const parseSize = (s) => {
@@ -38,19 +42,23 @@ const parseSize = (s) => {
   return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
 };
 
-const suite = getArg('--suite', 'smoke');
-const view = parseSize(getArg('--resolution', suite === 'smoke' ? '480x270' : '1920x1080'));
-const renderScale = getArg('--scale', suite === 'smoke' ? '0.5' : '1');
-const bounces = getArg('--bounces', '2');
-const denoise = getArg('--denoise', '0');
-const timing = !hasFlag('--no-timing');
-const timingWarmup = parseInt(getArg('--time-warmup', '4'), 10);
-const refFrames = parseInt(getArg('--ref-frames', suite === 'smoke' ? '96' : '1600'), 10);
-const framesDefault = parseInt(getArg('--frames', suite === 'smoke' ? '24' : '64'), 10);
-const repeats = parseInt(getArg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
-const wantFlip = hasFlag('--flip') || suite === 'paper';
-const forceRefs = hasFlag('--force-refs');
-const refsOnly = hasFlag('--refs');
+const suite = arg('--suite', 'smoke');
+const view = parseSize(arg('--resolution', '1920x1080'));
+const renderScale = arg('--scale', '1');
+const bounces = arg('--bounces', '2');
+const denoise = arg('--denoise', '0');
+const timing = !flag('--no-timing');
+const timingWarmup = parseInt(arg('--time-warmup', '4'), 10);
+const refFrames = parseInt(arg('--ref-frames', suite === 'smoke' ? '16' : '1600'), 10);
+const framesDefault = parseInt(arg('--frames', suite === 'smoke' ? '8' : '64'), 10);
+const repeats = parseInt(arg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
+const wantFlip = flag('--flip') || suite === 'paper';
+const forceRefs = flag('--force-refs');
+const refsOnly = flag('--refs');
+const allowSoftwareGpu = flag('--allow-software-gpu');
+const allowNonNvidiaGpu = flag('--allow-non-nvidia-gpu');
+const explicitRequireNvidia = flag('--require-nvidia-gpu') || process.env.VOXELRT_REQUIRE_NVIDIA_GPU === '1';
+const nvidiaGpus = detectNvidiaGpu();
 
 function findPythonExecutable() {
   if (process.env.PYTHON) return process.env.PYTHON;
@@ -69,27 +77,9 @@ function findPythonExecutable() {
   return 'python';
 }
 
-const python = getArg('--python', findPythonExecutable());
+const python = arg('--python', findPythonExecutable());
 
-function findChromiumExecutable() {
-  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
-  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
-    const root = join(process.env.LOCALAPPDATA, 'ms-playwright');
-    if (existsSync(root)) {
-      const dirs = readdirSync(root)
-        .filter((d) => /^chromium-\d+$/.test(d))
-        .sort()
-        .reverse();
-      for (const d of dirs) {
-        const exe = join(root, d, 'chrome-win64', 'chrome.exe');
-        if (existsSync(exe)) return exe;
-      }
-    }
-  }
-  return null;
-}
-
-if (hasFlag('--install-flip')) {
+if (flag('--install-flip')) {
   const r = spawnSync(python, ['-m', 'pip', 'install', 'flip-evaluator'], { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
@@ -115,6 +105,8 @@ const BASE_CONFIGS = {
   gi: 'preset=gi',
   lin: 'preset=lin',
   ours: 'preset=ours',
+  ours_no_lightpower: 'preset=ours&lightpower=0',
+  ours_no_dup: 'preset=ours&dupmap=0',
 };
 
 // Existing renderer flags mapped into the paper's ablation shape. The early
@@ -128,6 +120,7 @@ const ABLATIONS = {
   dupmap: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1',
   vector: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1&vector=1',
   lin: 'preset=lin',
+  ours_no_lightpower: 'preset=ours&lightpower=0',
   ours_no_dup: 'preset=ours&dupmap=0',
   ours: 'preset=ours',
 };
@@ -140,14 +133,14 @@ const CONVERGENCE = {
 };
 
 const defaultScenarios = suite === 'smoke' ? 'interior_static' : 'interior_static,interior_move,exterior_static,exterior_move';
-const scenarioNames = parseList(getArg('--scenarios', defaultScenarios));
+const scenarioNames = parseList(arg('--scenarios', defaultScenarios));
 const defaultConfigs = suite === 'ablation'
   ? Object.keys(ABLATIONS).join(',')
   : suite === 'convergence'
     ? Object.keys(CONVERGENCE).join(',')
     : 'base,lin,ours';
-const configNames = parseList(getArg('--configs', defaultConfigs));
-const frameList = parseList(getArg('--frame-list', suite === 'convergence' ? '1,2,4,8,16,32,64,96,128' : String(framesDefault)))
+const configNames = parseList(arg('--configs', defaultConfigs));
+const frameList = parseList(arg('--frame-list', suite === 'convergence' ? '1,2,4,8,16,32,64,96,128' : String(framesDefault)))
   .map((x) => parseInt(x, 10));
 
 function configQuery(name) {
@@ -210,25 +203,50 @@ const server = http.createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 
-const browserArgs = [
-  '--no-sandbox',
-  '--enable-unsafe-webgpu',
-  '--enable-features=Vulkan',
-  '--disable-gpu-vsync',
-  '--disable-frame-rate-limit',
-];
-const launch = { args: browserArgs };
-const chromiumExecutable = findChromiumExecutable();
-if (chromiumExecutable) launch.executablePath = chromiumExecutable;
+const launch = chromiumLaunchOptions({ benchmark: true });
 const browser = await chromium.launch(launch);
+const browserVersion = browser.version();
+const page = await browser.newPage({ viewport: view, deviceScaleFactor: 1 });
+let pageError = null;
+let adapterDiagnostics = null;
+
+page.on('pageerror', (e) => { pageError = e.message; });
+page.on('console', (m) => {
+  if (m.type() === 'error') console.log(`[page:error] ${m.text()}`);
+});
+
+function validateAdapter(adapterInfo) {
+  if (adapterDiagnostics) return;
+  const requireNvidia = explicitRequireNvidia || Boolean(nvidiaGpus?.length && !allowNonNvidiaGpu);
+  const assessed = assessAdapter(adapterInfo, {
+    requireHardware: !allowSoftwareGpu,
+    requireNvidia,
+    label: 'Chromium WebGPU adapter',
+  });
+  adapterDiagnostics = {
+    adapterInfo,
+    text: assessed.text,
+    nvidiaGpus,
+    launchArgs: launch.args,
+    executablePath: launch.executablePath || null,
+  };
+  if (nvidiaGpus?.length) console.log(`Host NVIDIA GPU(s): ${nvidiaGpus.join('; ')}`);
+  console.log(`Chromium WebGPU adapter: ${assessed.text}`);
+  for (const warning of assessed.warnings) console.warn(`WARNING: ${warning}`);
+}
+
+function recordTimingContext(gpuTiming) {
+  if (!adapterDiagnostics) return;
+  adapterDiagnostics.timestampQuery = {
+    requested: gpuTiming?.requested ?? false,
+    supported: gpuTiming?.supported ?? false,
+    warmupFrames: timingWarmup,
+    error: gpuTiming?.error,
+  };
+}
 
 async function render(query, frames, { hdr = true } = {}) {
-  const page = await browser.newPage({ viewport: view, deviceScaleFactor: 1 });
-  let pageError = null;
-  page.on('pageerror', (e) => { pageError = e.message; });
-  page.on('console', (m) => {
-    if (m.type() === 'error') console.log(`[page:error] ${m.text()}`);
-  });
+  pageError = null;
   const url = `http://127.0.0.1:${port}/?${buildQuery(query, frames)}`;
   const t0 = Date.now();
   await page.goto(url);
@@ -241,9 +259,11 @@ async function render(query, frames, { hdr = true } = {}) {
     frames: window.__voxelrt.frames,
     error: window.__voxelrt.error,
     gpuTiming: window.__voxelrt.gpuTiming,
+    adapterInfo: window.__voxelrt.adapterInfo,
   }));
+  validateAdapter(state.adapterInfo);
+  recordTimingContext(state.gpuTiming);
   if (state.error || pageError) {
-    await page.close();
     throw new Error(`renderer: ${state.error || pageError} (query=${query})`);
   }
   if (timing && state.gpuTiming?.supported) {
@@ -258,8 +278,8 @@ async function render(query, frames, { hdr = true } = {}) {
   const stateAfterCapture = await page.evaluate(() => ({
     frames: window.__voxelrt.frames,
     gpuTiming: window.__voxelrt.gpuTiming,
+    adapterInfo: window.__voxelrt.adapterInfo,
   }));
-  await page.close();
   return {
     rgb: Buffer.from(cap.rgb, 'base64'),
     png: Buffer.from(cap.png.split(',')[1], 'base64'),
@@ -269,6 +289,7 @@ async function render(query, frames, { hdr = true } = {}) {
     h: cap.h,
     wallMsPerFrame: (Date.now() - t0) / frames,
     gpuTiming: stateAfterCapture.gpuTiming,
+    adapterInfo: stateAfterCapture.adapterInfo,
   };
 }
 
@@ -283,6 +304,111 @@ function averageTimings(gpuTiming) {
   out.total = total;
   out.frames = gpuTiming.frames;
   return out;
+}
+
+function performanceStats(frameCount, wallMsPerFrame, gpuMs) {
+  const megapixels = (view.width * view.height) / 1e6;
+  const stats = {
+    frames: frameCount,
+    pixels: view.width * view.height,
+    megapixels,
+    wallMsPerFrame,
+    wallFps: 1000 / wallMsPerFrame,
+    wallRunMs: wallMsPerFrame * frameCount,
+  };
+  if (!gpuMs?.total) return stats;
+
+  stats.gpuMsPerFrame = gpuMs.total;
+  stats.gpuFps = 1000 / gpuMs.total;
+  stats.gpuMsPerMegapixel = gpuMs.total / megapixels;
+  stats.gpuRunMs = gpuMs.total * frameCount;
+  stats.timingFrames = gpuMs.frames;
+
+  let dominantName = '';
+  let dominantMs = 0;
+  const passPercent = {};
+  for (const [name, ms] of Object.entries(gpuMs)) {
+    if (name === 'total' || name === 'frames') continue;
+    passPercent[name] = (ms / gpuMs.total) * 100;
+    if (ms > dominantMs) {
+      dominantName = name;
+      dominantMs = ms;
+    }
+  }
+  stats.gpuPassPercent = passPercent;
+  stats.dominantPass = dominantName;
+  stats.dominantPassPercent = dominantName ? passPercent[dominantName] : 0;
+  return stats;
+}
+
+function formatPerf(stats) {
+  const wall = `wall ${stats.wallMsPerFrame.toFixed(1)} ms/f ${stats.wallFps.toFixed(1)} fps`;
+  if (!stats.gpuMsPerFrame) return wall;
+  const gpu = `GPU ${stats.gpuMsPerFrame.toFixed(2)} ms/f ${stats.gpuFps.toFixed(1)} fps`;
+  const norm = `${stats.gpuMsPerMegapixel.toFixed(2)} ms/MP`;
+  const cost = `cost ${(stats.gpuRunMs / 1000).toFixed(2)} GPU-s/${stats.frames}f`;
+  const timed = stats.timingFrames ? `timed ${stats.timingFrames}f` : '';
+  const pass = stats.dominantPass
+    ? `${stats.dominantPass} ${stats.dominantPassPercent.toFixed(0)}%`
+    : '';
+  return [wall, gpu, norm, cost, timed, pass].filter(Boolean).join(' | ');
+}
+
+function quantile(values, q) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function sampleStats(values) {
+  const xs = values.filter((v) => Number.isFinite(v));
+  if (!xs.length) return null;
+  const mean = xs.reduce((s, v) => s + v, 0) / xs.length;
+  const variance = xs.length > 1
+    ? xs.reduce((s, v) => s + (v - mean) ** 2, 0) / (xs.length - 1)
+    : 0;
+  const stddev = Math.sqrt(variance);
+  return {
+    n: xs.length,
+    mean,
+    median: quantile(xs, 0.5),
+    stddev,
+    cv: mean !== 0 ? stddev / mean : 0,
+    min: Math.min(...xs),
+    p95: quantile(xs, 0.95),
+    max: Math.max(...xs),
+  };
+}
+
+function summarizeGroup(scenario, config, frameCount, rows, avgMse, avgFlip) {
+  const wall = sampleStats(rows.map((r) => r.perf?.wallMsPerFrame));
+  const gpu = sampleStats(rows.map((r) => r.perf?.gpuMsPerFrame));
+  const gpuMp = sampleStats(rows.map((r) => r.perf?.gpuMsPerMegapixel));
+  const gpuCost = sampleStats(rows.map((r) => r.perf?.gpuRunMs));
+  const metric = avgFlip != null
+    ? { name: 'flip', mean: avgFlip }
+    : { name: 'hdrMse', mean: avgMse };
+  return {
+    scenario,
+    config,
+    frames: frameCount,
+    repeats: rows.length,
+    metric,
+    wallMsPerFrame: wall,
+    gpuMsPerFrame: gpu,
+    gpuMsPerMegapixel: gpuMp,
+    gpuRunMs: gpuCost,
+    timingFramesMean: sampleStats(rows.map((r) => r.perf?.timingFrames))?.mean ?? null,
+    dominantPasses: rows.map((r) => ({
+      repeat: r.repeat,
+      pass: r.perf?.dominantPass,
+      percent: r.perf?.dominantPassPercent,
+    })),
+  };
 }
 
 async function score(refPath, testPath, w, h) {
@@ -354,10 +480,10 @@ async function reference(name, scen) {
   return { f32, png, meta };
 }
 
-const shotQ = getArg('--shot', null);
+const shotQ = arg('--shot', null);
 if (shotQ) {
-  const frames = parseInt(getArg('--frames', '32'), 10);
-  const out = getArg('--out', join(ROOT, 'test', 'shot.png'));
+  const frames = parseInt(arg('--frames', '32'), 10);
+  const out = arg('--out', join(ROOT, 'test', 'shot.png'));
   const r = await render(shotQ, frames, { hdr: true });
   await writeFile(out, r.png);
   const stem = safe(`shot_${Date.now()}`);
@@ -369,6 +495,7 @@ if (shotQ) {
 }
 
 const results = [];
+const summaries = [];
 for (const sn of scenarioNames) {
   const scen = SCENARIOS[sn];
   if (!scen) throw new Error(`unknown scenario ${sn}`);
@@ -383,12 +510,16 @@ for (const sn of scenarioNames) {
       let wallSum = 0;
       const timingSums = {};
       let timingN = 0;
+      let timingFramesSum = 0;
+      const groupRows = [];
 
       for (let rep = 0; rep < repeats; rep++) {
         const q = `${configQuery(cn)}&${poseQuery(scen.pose)}` +
           (scen.move ? `&benchmove=${scen.move}` : '') +
           `&fseed=${rep * 7717}`;
         const cap = await render(q, frameCount, { hdr: true });
+        const avg = averageTimings(cap.gpuTiming);
+        const perf = performanceStats(frameCount, cap.wallMsPerFrame, avg);
         const stem = safe(`${sn}_${cn}_${frameCount}f_r${rep}_${view.width}x${view.height}`);
         const files = await writeCapture(stem, cap, {
           scenario: sn,
@@ -396,9 +527,9 @@ for (const sn of scenarioNames) {
           query: q,
           frames: frameCount,
           repeat: rep,
+          perf,
         });
         const m = await score(ref.f32, files.f32, cap.w, cap.h);
-        const avg = averageTimings(cap.gpuTiming);
         mseSum += m.hdrMse;
         if (m.flip != null) {
           flipSum += m.flip;
@@ -407,6 +538,7 @@ for (const sn of scenarioNames) {
         wallSum += cap.wallMsPerFrame;
         if (avg) {
           timingN++;
+          timingFramesSum += avg.frames || 0;
           for (const [name, ms] of Object.entries(avg)) {
             if (name !== 'frames') timingSums[name] = (timingSums[name] || 0) + ms;
           }
@@ -426,23 +558,32 @@ for (const sn of scenarioNames) {
           flipError: m.flipError,
           wallMsPerFrame: cap.wallMsPerFrame,
           gpuMs: avg,
+          perf,
           png: files.png,
           hdr: files.f32,
         };
         results.push(row);
+        groupRows.push(row);
         const metric = m.flip != null ? `FLIP ${m.flip.toFixed(4)}` : `HDR-MSE ${m.hdrMse.toExponential(3)}`;
-        const gpu = avg?.total ? ` GPU ${avg.total.toFixed(2)} ms` : '';
-        console.log(`${sn.padEnd(16)} ${cn.padEnd(11)} ${String(frameCount).padStart(4)}f r${rep}  ${metric}${gpu}`);
+        console.log(`${sn.padEnd(16)} ${cn.padEnd(18)} ${String(frameCount).padStart(4)}f r${rep}  ${metric} | ${formatPerf(perf)}`);
       }
 
       const avgMse = mseSum / repeats;
       const avgFlip = flipN ? flipSum / flipN : null;
+      const avgWall = wallSum / repeats;
       const avgTimings = timingN
         ? Object.fromEntries(Object.entries(timingSums).map(([k, v]) => [k, v / timingN]))
         : null;
+      if (avgTimings) avgTimings.frames = timingFramesSum / timingN;
+      const avgPerf = performanceStats(frameCount, avgWall, avgTimings);
       const summaryMetric = avgFlip != null ? `FLIP ${avgFlip.toFixed(4)}` : `HDR-MSE ${avgMse.toExponential(3)}`;
-      const summaryGpu = avgTimings?.total ? ` GPU ${avgTimings.total.toFixed(2)} ms` : '';
-      console.log(`  avg ${sn}/${cn}/${frameCount}f: ${summaryMetric}${summaryGpu}, wall ${(wallSum / repeats).toFixed(0)} ms/f`);
+      const summary = summarizeGroup(sn, cn, frameCount, groupRows, avgMse, avgFlip);
+      summaries.push(summary);
+      const jitter = summary.gpuMsPerFrame && summary.gpuMsPerFrame.n > 1
+        ? ` | GPU median ${summary.gpuMsPerFrame.median.toFixed(2)} ms cv ${(summary.gpuMsPerFrame.cv * 100).toFixed(1)}% p95 ${summary.gpuMsPerFrame.p95.toFixed(2)}`
+        : '';
+      console.log(`  avg ${sn}/${cn}/${frameCount}f: ${summaryMetric} | ${formatPerf(avgPerf)}`);
+      if (jitter) console.log(`      repeats ${summary.repeats}${jitter}`);
     }
   }
 }
@@ -462,12 +603,22 @@ const settings = {
   configs: configNames,
   frameList,
   wantFlip,
+  gpu: adapterDiagnostics,
+  runtime: {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    browserVersion,
+    argv: process.argv.slice(2),
+  },
 };
-await writeFile(join(EVALDIR, 'results.json'), JSON.stringify({ settings, results }, null, 2));
+await writeFile(join(EVALDIR, 'results.json'), JSON.stringify({ settings, results, summaries }, null, 2));
 const csv = [
-  'scenario,config,frames,repeat,flip,hdrMse,hdrRmse,hdrPsnrPeak,meanAbsRelative,wallMsPerFrame,gpuTotalMs,pathtraceMs,reuseTemporalMs,reuseSpatialMs,dupmapMs,temporalMs,atrousMs',
+  'scenario,config,frames,repeat,flip,hdrMse,hdrRmse,hdrPsnrPeak,meanAbsRelative,pixels,megapixels,wallMsPerFrame,wallFps,wallRunMs,gpuMsPerFrame,gpuFps,gpuMsPerMegapixel,gpuRunMs,timingFrames,dominantPass,dominantPassPercent,pathtraceMs,reuseTemporalMs,reuseSpatialMs,dupmapMs,temporalMs,atrousMs,pathtracePct,reuseTemporalPct,reuseSpatialPct,dupmapPct,temporalPct,atrousPct',
   ...results.map((r) => {
     const g = r.gpuMs || {};
+    const p = r.perf || {};
+    const pct = p.gpuPassPercent || {};
     const atrous = Object.entries(g)
       .filter(([k]) => k.startsWith('atrous'))
       .reduce((s, [, v]) => s + v, 0);
@@ -481,18 +632,77 @@ const csv = [
       r.hdrRmse,
       r.hdrPsnrPeak,
       r.meanAbsRelative,
+      p.pixels ?? '',
+      p.megapixels ?? '',
       r.wallMsPerFrame,
-      g.total ?? '',
+      p.wallFps ?? '',
+      p.wallRunMs ?? '',
+      p.gpuMsPerFrame ?? g.total ?? '',
+      p.gpuFps ?? '',
+      p.gpuMsPerMegapixel ?? '',
+      p.gpuRunMs ?? '',
+      p.timingFrames ?? g.frames ?? '',
+      p.dominantPass ?? '',
+      p.dominantPassPercent ?? '',
       g.pathtrace ?? '',
       g.reuse_temporal ?? '',
       g.reuse_spatial ?? '',
       g.dupmap ?? '',
       g.temporal ?? '',
       atrous || '',
+      pct.pathtrace ?? '',
+      pct.reuse_temporal ?? '',
+      pct.reuse_spatial ?? '',
+      pct.dupmap ?? '',
+      pct.temporal ?? '',
+      pct.atrous ?? '',
     ].join(',');
   }),
 ].join('\n');
 await writeFile(join(EVALDIR, 'results.csv'), `${csv}\n`);
+
+const statFields = (prefix) => [
+  `${prefix}N`,
+  `${prefix}Mean`,
+  `${prefix}Median`,
+  `${prefix}Stddev`,
+  `${prefix}Cv`,
+  `${prefix}Min`,
+  `${prefix}P95`,
+  `${prefix}Max`,
+];
+const statValues = (s) => s
+  ? [s.n, s.mean, s.median, s.stddev, s.cv, s.min, s.p95, s.max]
+  : ['', '', '', '', '', '', '', ''];
+const summaryCsv = [
+  [
+    'scenario',
+    'config',
+    'frames',
+    'repeats',
+    'metric',
+    'metricMean',
+    ...statFields('wallMsPerFrame'),
+    ...statFields('gpuMsPerFrame'),
+    ...statFields('gpuMsPerMegapixel'),
+    ...statFields('gpuRunMs'),
+    'timingFramesMean',
+  ].join(','),
+  ...summaries.map((s) => [
+    s.scenario,
+    s.config,
+    s.frames,
+    s.repeats,
+    s.metric.name,
+    s.metric.mean,
+    ...statValues(s.wallMsPerFrame),
+    ...statValues(s.gpuMsPerFrame),
+    ...statValues(s.gpuMsPerMegapixel),
+    ...statValues(s.gpuRunMs),
+    s.timingFramesMean ?? '',
+  ].join(',')),
+].join('\n');
+await writeFile(join(EVALDIR, 'summary.csv'), `${summaryCsv}\n`);
 
 await browser.close();
 server.close();
@@ -501,4 +711,4 @@ if (wantFlip && results.some((r) => !r.flipAvailable)) {
   console.log('\nHDR-FLIP was requested but not available for at least one row.');
   console.log(`Install it with: ${python} -m pip install flip-evaluator`);
 }
-console.log(`\nWrote ${join(EVALDIR, 'results.json')} and ${join(EVALDIR, 'results.csv')}`);
+console.log(`\nWrote ${join(EVALDIR, 'results.json')}, ${join(EVALDIR, 'results.csv')} and ${join(EVALDIR, 'summary.csv')}`);

@@ -6,37 +6,27 @@
 
 import { chromium } from 'playwright';
 import http from 'node:http';
-import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  assessAdapter,
+  chromiumLaunchOptions,
+  detectNvidiaGpu,
+  getArg,
+  hasFlag,
+} from './gpu-launch.mjs';
 
 const args = process.argv.slice(2);
-const getArg = (name, dflt) => {
-  const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : dflt;
-};
-const WAIT_FRAMES = parseInt(getArg('--frames', '12'), 10);
-const OUT = getArg('--out', 'test/screenshot.png');
+const arg = (name, dflt) => getArg(args, name, dflt);
+const flag = (name) => hasFlag(args, name);
+const WAIT_FRAMES = parseInt(arg('--frames', '4'), 10);
+const OUT = arg('--out', 'test/screenshot.png');
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-
-function findChromiumExecutable() {
-  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
-  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
-    const root = join(process.env.LOCALAPPDATA, 'ms-playwright');
-    if (existsSync(root)) {
-      const dirs = readdirSync(root)
-        .filter((d) => /^chromium-\d+$/.test(d))
-        .sort()
-        .reverse();
-      for (const d of dirs) {
-        const exe = join(root, d, 'chrome-win64', 'chrome.exe');
-        if (existsSync(exe)) return exe;
-      }
-    }
-  }
-  return null;
-}
+const allowSoftwareGpu = flag('--allow-software-gpu');
+const allowNonNvidiaGpu = flag('--allow-non-nvidia-gpu');
+const explicitRequireNvidia = flag('--require-nvidia-gpu') || process.env.VOXELRT_REQUIRE_NVIDIA_GPU === '1';
+const nvidiaGpus = detectNvidiaGpu();
 
 const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.wgsl': 'text/plain', '.png': 'image/png',
@@ -59,22 +49,16 @@ const server = http.createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 
-const browserArgs = [
-  '--no-sandbox',
-  '--enable-unsafe-webgpu',
-  '--enable-features=Vulkan',
-];
-const launch = { args: browserArgs };
-const chromiumExecutable = findChromiumExecutable();
-if (chromiumExecutable) launch.executablePath = chromiumExecutable;
+const launch = chromiumLaunchOptions({ benchmark: false });
 const browser = await chromium.launch(launch);
 
-const page = await browser.newPage({ viewport: { width: 480, height: 270 } });
+const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
 page.on('console', (m) => console.log(`[page:${m.type()}]`, m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 
-// Small render target + 1 bounce keeps the smoke test quick.
-const query = getArg('--query', 'scale=0.5&bounces=1&nocanvas=1');
+// A short 1920x1080 run keeps the smoke test quick without changing the
+// resolution used by the browser benchmark path.
+const query = arg('--query', 'scale=1&bounces=1&nocanvas=1');
 await page.goto(`http://127.0.0.1:${port}/?${query}`);
 
 try {
@@ -99,6 +83,15 @@ if (state.error) {
   server.close();
   process.exit(1);
 }
+const requireNvidia = explicitRequireNvidia || Boolean(nvidiaGpus?.length && !allowNonNvidiaGpu);
+const assessed = assessAdapter(state.adapterInfo, {
+  requireHardware: !allowSoftwareGpu,
+  requireNvidia,
+  label: 'Chromium WebGPU adapter',
+});
+if (nvidiaGpus?.length) console.log(`Host NVIDIA GPU(s): ${nvidiaGpus.join('; ')}`);
+console.log(`Chromium WebGPU adapter: ${assessed.text}`);
+for (const warning of assessed.warnings) console.warn(`WARNING: ${warning}`);
 
 // Read the rendered image straight off the GPU (canvas presentation is not
 // composited in some headless environments, so a page screenshot can be

@@ -23,6 +23,8 @@
 @group(0) @binding(6) var<storage, read> lights : array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read_write> reservoirsA : array<Reservoir>;
 @group(0) @binding(8) var directOut   : texture_storage_2d<rgba16float, write>;
+// x = alias acceptance probability, y = alias index, z = selection PDF.
+@group(0) @binding(9) var<storage, read> lightAlias : array<vec4<f32>>;
 
 const FIREFLY_CLAMP : f32 = 48.0;
 
@@ -36,7 +38,20 @@ struct LightPoint {
 fn sampleLightFace() -> LightPoint {
   var lp : LightPoint;
   let count = u.params2.y;
-  let li = min(u32(rand() * f32(count)), count - 1u);
+  var li : u32;
+  var pdfSelect : f32;
+  if (rflag(RF_LIGHTPOWER)) {
+    let uLight = rand() * f32(count);
+    let base = min(u32(uLight), count - 1u);
+    let frac = uLight - f32(base);
+    let rec = lightAlias[base];
+    let aliasLi = min(u32(rec.y + 0.5), count - 1u);
+    li = select(base, aliasLi, frac >= rec.x);
+    pdfSelect = max(lightAlias[li].z, 1e-8);
+  } else {
+    li = min(u32(rand() * f32(count)), count - 1u);
+    pdfSelect = 1.0 / f32(count);
+  }
   let l = lights[li];
   let v = vec3<f32>(f32(l.x & 0x1ffu), f32((l.x >> 9u) & 0x1ffu), f32((l.x >> 18u) & 0x1ffu));
   let face = (l.x >> 27u) & 7u;
@@ -51,7 +66,7 @@ fn sampleLightFace() -> LightPoint {
   lp.pos = q * VOXEL_SIZE;
   lp.n = n;
   lp.Le = mat.albedo * (mat.emissive * EMISSIVE_SCALE);
-  lp.pdfA = 1.0 / (f32(count) * VOXEL_SIZE * VOXEL_SIZE);
+  lp.pdfA = pdfSelect / (VOXEL_SIZE * VOXEL_SIZE);
   return lp;
 }
 
@@ -60,14 +75,15 @@ fn sampleLightFace() -> LightPoint {
 fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>) -> vec3<f32> {
   if (u.params2.y == 0u) { return vec3<f32>(0.0); }
   let lp = sampleLightFace();
-  let d = lp.pos - pos;
+  let surf = pos + n * 1e-3;
+  let d = lp.pos - surf;
   let r2 = max(dot(d, d), 1e-6);
   let dir = d * inverseSqrt(r2);
   let cos1 = dot(n, dir);
   let cos2 = dot(lp.n, -dir);
   if (cos1 <= 0.0 || cos2 <= 0.0) { return vec3<f32>(0.0); }
   let r = sqrt(r2);
-  if (traceShadow(pos + n * 1e-3, dir, r - 2e-3)) { return vec3<f32>(0.0); }
+  if (traceShadow(surf, dir, r - 2e-3)) { return vec3<f32>(0.0); }
   return albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
 }
 
@@ -260,7 +276,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
     }
     if (eSel.kind != SK_NONE && eSelP > 0.0) {
-      let d = eSel.pos - x1;
+      let d = eSel.pos - surf1;
       let r = length(d);
       if (!traceShadow(surf1, d / r, r - 2e-3)) {
         let We = eSum / eSelP;                    // RIS contribution weight

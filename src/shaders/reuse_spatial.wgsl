@@ -88,7 +88,7 @@ fn sampleVisible(s : Sample, x1 : vec3<f32>, n1 : vec3<f32>) -> bool {
   if (s.kind == SK_DIR) {
     return !traceShadow(surf, s.pos, 1e4);
   }
-  let d = s.pos - x1;
+  let d = s.pos - surf;
   let r = length(d);
   if (r < 2e-3) { return true; }
   return !traceShadow(surf, d / r, r - 2e-3);

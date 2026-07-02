@@ -13,13 +13,24 @@
 
 @group(0) @binding(1) var<storage, read> voxels : array<u32>;
 @group(0) @binding(2) var<storage, read> bricks : array<u32>;
+@group(0) @binding(10) var<storage, read> brickMasks : array<u32>;
 
 fn voxelAt(p : vec3<i32>) -> u32 {
   return voxels[u32(p.x) + u32(p.y) * u32(GRID) + u32(p.z) * u32(GRID * GRID)];
 }
 
+fn brickIndex(p : vec3<i32>) -> u32 {
+  return u32(p.x) + u32(p.y) * u32(BGRID) + u32(p.z) * u32(BGRID * BGRID);
+}
+
 fn brickAt(p : vec3<i32>) -> u32 {
-  return bricks[u32(p.x) + u32(p.y) * u32(BGRID) + u32(p.z) * u32(BGRID * BGRID)];
+  return bricks[brickIndex(p)];
+}
+
+fn brickVoxelOccupied(bi : u32, local : vec3<i32>) -> bool {
+  let bit = u32(local.x + local.y * BRICK + local.z * BRICK * BRICK);
+  let word = brickMasks[bi * 16u + (bit >> 5u)];
+  return (word & (1u << (bit & 31u))) != 0u;
 }
 
 struct Material {
@@ -95,7 +106,8 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
   for (var iter = 0; iter < 3 * BGRID + 2; iter++) {
     if (t > tExit) { break; }
 
-    if (brickAt(bpos) != 0u) {
+    let bi = brickIndex(bpos);
+    if (bricks[bi] != 0u) {
       // Refine inside this brick with a per-voxel DDA.
       let bMin = bpos * BRICK;
       let bMax = bMin + vec3<i32>(BRICK - 1);
@@ -106,8 +118,9 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
       var vmask = mask;
 
       for (var j = 0; j < 3 * BRICK; j++) {
-        let m = voxelAt(vpos);
-        if (m != 0u) {
+        let local = vpos - bMin;
+        if (brickVoxelOccupied(bi, local)) {
+          let m = voxelAt(vpos);
           if (tCur > maxT) { return hit; }
           hit.t = tCur * VOXEL_SIZE;
           hit.n = -vmask * vec3<f32>(stepDir);
