@@ -1,5 +1,24 @@
 # Status: ReSTIR pipeline implementation (handoff, 2026-07-02)
 
+## 2026-07-01 campaign update (see docs/PLAN.md for the full plan)
+
+- **fp16 accumulation drift found and fixed.** All pre-fix "converged"
+  references and bias measurements were contaminated: accumulation lived in
+  rgba16float with the history count in fp16 alpha (integers >2048 not
+  representable; running-mean increments fall below the fp16 ulp near ~1000
+  frames). Measured effect: base@800f vs base@1600f differed by +3–5% in
+  channel means with identical seeds. Accumulation is now rgba32float when
+  `float32-filterable` is available (it is, on the RTX 3080) and the HDR
+  readback decodes both layouts. **The earlier "8–18% darker" bias numbers
+  (240×135, fp16 accum) are unreliable; re-measured post-fix below.**
+- **fullv fix looks confirmed at equal frame count**: ours vs base at 800
+  frames (both fp16 at the time) agreed to ±3% per channel — the historical
+  8–18% deficit is gone. Converged fp32 confirmation ladder in flight.
+- Five features implemented in parallel on branches `feature/mixsigma`,
+  `feature/adaptcand`, `feature/confdenoise`, `feature/lightgrid`,
+  `feature/mutate` (flag bits 8192..131072, params5/params6 slots — see
+  common.wgsl). Keep/kill by equal-time FLIP per docs/RESEARCH_LOOP.md.
+
 Working notes for whoever picks this up next. Read alongside
 `docs/lin2026-restirptenhanced.pdf` (Lin, Kettunen, Wyman — "ReSTIR PT
 Enhanced", the golden reference for this work) and `docs/RESEARCH_LOOP.md`

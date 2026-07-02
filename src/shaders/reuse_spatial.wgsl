@@ -141,7 +141,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     for (var ti = 0u; ti < taps; ti++) {
       var q : vec2<i32>;
       if (paired) {
-        q = pairedPartner(pix, ti);
+        // With RF_MIXSIGMA the host builds pairing texture 0 with the wide σ
+        // (params5.x) and the rest with the base σ, so route the LAST tap to
+        // texture 0 and shift the others up — near taps keep gathering
+        // detail while one long-range tap collects low-frequency GI. σ only
+        // shapes which partner a pixel gets; it never enters the MIS/weight
+        // math, so mixing tap widths needs no weight changes.
+        var tex = ti;
+        if (rflag(RF_MIXSIGMA)) {
+          tex = select(ti + 1u, 0u, ti + 1u == taps);
+        }
+        q = pairedPartner(pix, tex);
       } else {
         // Classic random neighbor in a uniform disk (radius in params4.x).
         let r = u.params4.x * sqrt(rand());

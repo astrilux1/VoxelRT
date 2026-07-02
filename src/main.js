@@ -207,7 +207,12 @@ async function init() {
   device.queue.writeBuffer(lightAliasBuf, 0, scene.lightAlias);
 
   // Self-inverting Gaussian pairing textures for paired spatial reuse.
-  const pairingData = makePairingBuffer(Math.max(0.8, tuning.sigma));
+  // With RF_MIXSIGMA the wide-σ tap lives in texture 0 — the largest (254²),
+  // so the least Gaussian tail wraps by tiling — and reuse_spatial.wgsl
+  // routes the LAST tap there; the other taps keep the base σ.
+  const sigmaBase = Math.max(0.8, tuning.sigma);
+  const sigmaWide = (restirFlags & RF.mixsigma) ? Math.max(0.8, tuning.sigma2) : sigmaBase;
+  const pairingData = makePairingBuffer([sigmaWide, sigmaBase, sigmaBase]);
   const pairingBuf = device.createBuffer({
     label: 'pairing', size: pairingData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
