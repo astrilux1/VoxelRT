@@ -20,6 +20,7 @@ import { makePairingBuffer } from './pairing.js';
 
 const params = new URLSearchParams(location.search);
 const GRID = parseInt(params.get('grid') || '256', 10);
+const SCENE_VARIANT = params.get('scene') || 'default';
 let renderScale = parseFloat(params.get('scale') || '1');
 let bounces = parseInt(params.get('bounces') || '2', 10);
 let exposure = 1.0;
@@ -172,7 +173,7 @@ async function init() {
   }
 
   // --- Scene ---------------------------------------------------------------
-  const scene = generateScene(GRID);
+  const scene = generateScene(GRID, SCENE_VARIANT);
   const voxelBuf = device.createBuffer({
     label: 'voxels', size: scene.vox.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
