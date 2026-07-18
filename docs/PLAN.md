@@ -87,8 +87,15 @@ The project is complete when all of the following are true:
 - Algorithm-only evaluation first; denoised/presented quality as a separate
   secondary axis.
 - Hardware-counter profiling as a core workflow piece (paper §7.1 NSight
-  parity), pending toolchain selection; profiled runs stay separate from
+  parity). Toolchain selected 2026-07-18 (`docs/PROFILING.md`): nsys
+  always-on layer + PIX/pixtool per-dispatch NVIDIA counters + Nsight GPU
+  Trace via the d3d12_webgpu_shim for stall-reason figures; dawn.node native
+  replica as parity-checked fallback. Profiled runs stay separate from
   timing runs so profiler overhead never contaminates claim timings.
+  Prerequisites: per-pass `pushDebugGroup` markers in `src/main.js`
+  (deferred until the v1 campaign is off the machine) and the local
+  verification checklist in PROFILING.md before any counter lands in
+  RESULTS.md.
 - A living results document (`docs/RESULTS.md`): every campaign lands with
   its commands, manifest hashes, and failure cases when it happens.
 
