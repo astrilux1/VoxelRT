@@ -188,6 +188,11 @@ const BASE_CONFIGS = {
   ours_mixsigma32: 'preset=ours&mixsigma=1&sigma2=32&fclamp=0',
   ours_mixsigma48: 'preset=ours&mixsigma=1&sigma2=48&fclamp=0',
   ours_mixsigma: 'preset=ours&mixsigma=1&fclamp=0',
+  // Phase 3 ladder rows (docs/PLAN.md §6): mutate's case is replacing the
+  // dupmap's intentional cCap bias, so it runs against the no-dupmap variant;
+  // confdenoise is presented-axis only and must be run with --denoise 1.
+  ours_mutate: 'preset=ours&dupmap=0&mutate=1&fclamp=0',
+  ours_confdenoise: 'preset=ours&confdenoise=1&fclamp=0',
   gi_histisolate: 'preset=gi&histisolate=1&maxhist=1000000&fclamp=0',
   unified_histisolate: 'preset=gi&unified=1&histisolate=1&maxhist=1000000&fclamp=0',
   lin_histisolate: 'preset=lin&dupmap=0&footprint=0&histisolate=1&maxhist=1000000&fclamp=0',

@@ -2,6 +2,37 @@
 
 ## 2026-07-01 campaign update (see docs/PLAN.md for the full plan)
 
+- **2026-07-18 Process hardening (no research results in this change).**
+  Implemented the process recommendations that came out of the post-world-GI
+  review; no estimator, shader logic, or evidence changed. **(1)** New non-GPU
+  fail-closed gate `npm run check` (`test/check.mjs`), run by CI on every push
+  (`.github/workflows/check.yml`): WGSL structural sanity, RF flag-bit and
+  uniform-layout agreement between `src/main.js` and `common.wgsl`, the
+  string-replacement anchors main.js patches, bench/claim configuration
+  resolution against real presets and knobs, claim+correctness manifest
+  validation, and binding of the checked-in evidence reports to the current
+  manifest SHA-256s (a manifest edit without re-running the GPU gates now
+  fails here instead of silently orphaning evidence). **(2)** One-command
+  entry points for the next queue items, runnable only on the benchmark
+  machine: `npm run bench:baseline` (PLAN §7 item 6: locked
+  `base`/`gi`/`lin`/`ours_unbiased`/`ours` convergence campaign over all six
+  scenarios, 5 repeats) and `npm run bench:ladder` /
+  `npm run bench:ladder:confdenoise` (item 7 rung-2 direction checks; adds
+  frozen-shape `ours_mutate` — `dupmap=0&mutate=1`, measured against
+  `ours_no_dup` — and `ours_confdenoise` configs to `bench.mjs`). **(3)**
+  Pre-registration is now mandatory for flag-adding experiments:
+  `docs/EXPERIMENT_TEMPLATE.md` (hypothesis, denominator, invariants,
+  acceptance, kill condition — filled in before code, thresholds immutable
+  after the first run), referenced from RESEARCH_LOOP.md §Loop.2; WORLDGI.md
+  is the worked example. **(4)** Documentation debt paid: README's features,
+  pipeline, URL-parameter, and testing sections now describe the actual
+  unified-ReSTIR renderer and all bench commands; `VoxelBench/` is deleted
+  (self-contained, nothing outside it referenced its code, its own rnd-log
+  recorded its techniques failing review; PLAN §6.6/old handoff item 5 —
+  history remains in git). **Next action is unchanged and now one command:**
+  run `npm run bench:baseline` on the RTX 3080 machine, then drive the four
+  parked flags through the ladder (`bench:ladder`), then shrink the default
+  `ours` preset to promoted techniques only.
 - **2026-07-18 Phase 4 primary bet KILLED WITH EVIDENCE: world-space GI reuse
   cache does not beat screen-space reuse in this renderer.** The thesis — that
   persistent brick/face GI reservoirs survive disocclusion/camera-return better

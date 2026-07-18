@@ -1,0 +1,21 @@
+# Cheap non-GPU gate for every push/PR. The real benchmark, correctness, and
+# claim suites need the locked RTX 3080 machine (see docs/PLAN.md §5) and never
+# run here; this only catches structural drift between campaigns:
+# shader/host contract breaks, invalid manifests, and evidence bound to stale
+# manifest hashes. No npm install: both commands use Node built-ins only.
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Non-GPU repository gate
+        run: node test/check.mjs
+      - name: Claim-manifest unit tests
+        run: node --test test/claim-manifest.test.mjs

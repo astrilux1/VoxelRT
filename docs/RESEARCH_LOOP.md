@@ -11,7 +11,11 @@ time. Treat that as a measured research claim, not a visual impression.
    - `lin`: faithful Lin 2026 adaptation.
    - `ours`: cumulative VoxelRT extensions.
 2. Add one hypothesis at a time behind a flag. Keep `lin` unchanged unless the
-   change is a correctness fix shared by all estimators.
+   change is a correctness fix shared by all estimators. Any experiment that
+   adds a flag, pass, buffer, or estimator term is pre-registered first:
+   copy `docs/EXPERIMENT_TEMPLATE.md`, fill in the hypothesis, denominator,
+   invariants, acceptance criteria, and kill condition before writing code
+   (`docs/WORLDGI.md` is the worked example).
 3. Start with short 1920x1080 smoke runs for compile, adapter, and gross
    signal checks. Do not use lower resolutions for research conclusions.
 4. Promote only surviving ideas to fixed-seed ablations, convergence curves,

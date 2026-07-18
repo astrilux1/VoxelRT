@@ -483,8 +483,12 @@ These are the next actions, in order:
    15/15 correctness rows, and retain cCap=20 only in the faithful real-time
    baseline.
 6. [ ] Run the locked `base`/`gi`/`lin`/`ours_unbiased`/`ours` baseline campaign.
+   One command on the benchmark machine: `npm run bench:baseline`.
 7. [ ] Promote or kill `sigma=32`, `adaptcand+lightgrid`, `confdenoise`, and
-   `mutate` using the Phase 3 ladder.
+   `mutate` using the Phase 3 ladder. Rung-2 direction checks are one command
+   on the benchmark machine: `npm run bench:ladder` (sampling axis, includes
+   the `ours_no_dup` control for `ours_mutate`) and
+   `npm run bench:ladder:confdenoise` (presented axis, denoiser on).
 8. [ ] Reduce the default `ours` preset to promoted techniques only.
 9. [x] World-space GI cache: implemented, tested, and **killed with evidence**
    (`docs/WORLDGI.md`, STATUS 2026-07-18). Three designs (everywhere/uncapped →
@@ -507,6 +511,12 @@ the baseline and correctness gates make experiment results trustworthy.
 - `STATUS.md` is the chronological handoff: current evidence, exact commands,
   promoted ideas, killed ideas, and next action.
 - `RESEARCH_LOOP.md` owns measurement rules shared by every experiment.
+- `EXPERIMENT_TEMPLATE.md` owns the pre-registration structure every
+  flag-adding experiment fills in before implementation.
+- `test/check.mjs` (`npm run check`, run by CI on every push) owns the
+  non-GPU structural gate: shader/host contracts, manifest validity, and
+  evidence-to-manifest hash binding. It complements — never replaces — the
+  GPU gates on the benchmark machine.
 - `test/eval/claim-manifest.*` will own claim-bearing machine parameters.
 - Generated benchmark files are evidence only when their metadata matches the
   frozen manifest; otherwise they are scratch results.
