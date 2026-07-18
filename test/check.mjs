@@ -95,14 +95,32 @@ if (hostFlags.size === 0) fail('src/main.js: RF flag map is empty');
 if (wgslFlags.size === 0) fail('common.wgsl: no RF_* flag constants found');
 const hostBits = [...hostFlags.values()].sort((a, b) => a - b);
 const wgslBits = [...wgslFlags.values()].sort((a, b) => a - b);
-if (JSON.stringify(hostBits) !== JSON.stringify(wgslBits)) {
-  fail(`flag bit sets differ: main.js [${hostBits}] vs common.wgsl [${wgslBits}]`);
-}
 for (const [where, bits] of [['src/main.js RF', hostBits], ['common.wgsl RF_*', wgslBits]]) {
   if (new Set(bits).size !== bits.length) fail(`${where}: duplicate flag bits`);
   for (const bit of bits) {
     if (bit <= 0 || (bit & (bit - 1)) !== 0) fail(`${where}: ${bit} is not a power of two`);
   }
+}
+// Compare the two sides *per flag*, not as bit sets: a permuted mapping
+// (host `treuse: 4` against `RF_SPATIAL = 4u`) leaves both sorted bit lists
+// identical while every preset silently enables the wrong shader feature.
+// The host keys and the WGSL names differ for three flags, so spell those out
+// and derive the rest as RF_<UPPERCASE>.
+const HOST_TO_WGSL = { treuse: 'RF_TEMPORAL', sreuse: 'RF_SPATIAL', rclamp: 'RF_CLAMP' };
+const wgslNameFor = (host) => HOST_TO_WGSL[host] ?? `RF_${host.toUpperCase()}`;
+const mappedWgslNames = new Set();
+for (const [host, bit] of hostFlags) {
+  const wgslName = wgslNameFor(host);
+  mappedWgslNames.add(wgslName);
+  if (!wgslFlags.has(wgslName)) {
+    fail(`src/main.js RF.${host} has no counterpart ${wgslName} in common.wgsl`);
+  } else if (wgslFlags.get(wgslName) !== bit) {
+    fail(`flag bit mismatch: main.js RF.${host} = ${bit} but ` +
+      `common.wgsl ${wgslName} = ${wgslFlags.get(wgslName)}`);
+  }
+}
+for (const name of wgslFlags.keys()) {
+  if (!mappedWgslNames.has(name)) fail(`common.wgsl ${name} has no counterpart in the src/main.js RF map`);
 }
 // Every RF_* referenced by any shader must be declared in common.wgsl.
 for (const [name, src] of Object.entries(shaders)) {

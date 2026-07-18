@@ -33,6 +33,24 @@
   run `npm run bench:baseline` on the RTX 3080 machine, then drive the four
   parked flags through the ladder (`bench:ladder`), then shrink the default
   `ours` preset to promoted techniques only.
+- **2026-07-18 `npm run check` mutation-tested; one real gap found and closed.**
+  A fail-closed gate that has only ever been observed passing is untested, so
+  the gate was run against 17 injected faults. 16 were caught. The miss: the
+  host/shader flag contract compared only the *sorted bit values* of
+  `src/main.js RF` and `common.wgsl RF_*`, so any **permutation** of the
+  mapping passed — e.g. host `treuse: 4` against `RF_SPATIAL = 4u` leaves both
+  sorted lists identical while every preset silently enables the wrong shader
+  feature. That is the exact class of silent contract break the gate exists to
+  catch, and it would corrupt a campaign run on top of it without failing a
+  single check. `test/check.mjs` now compares the two sides **per flag**, via an
+  explicit `HOST_TO_WGSL` alias map for the three flags whose names differ
+  (`treuse`→`RF_TEMPORAL`, `sreuse`→`RF_SPATIAL`, `rclamp`→`RF_CLAMP`) and
+  `RF_<UPPERCASE>` for the rest, and additionally fails when a flag exists on
+  only one side. Re-verified: host-side, WGSL-side, and 3-cycle permutations
+  plus one-sided renames are now caught, and three benign refactors
+  (reformatting, comment rewording, whitespace realignment) still pass. No
+  estimator, shader, or evidence change; `npm test`, `bench:preflight`, and
+  `bench --suite smoke` are green on the 3080 and unaffected.
 - **2026-07-18 Phase 4 primary bet KILLED WITH EVIDENCE: world-space GI reuse
   cache does not beat screen-space reuse in this renderer.** The thesis — that
   persistent brick/face GI reservoirs survive disocclusion/camera-return better

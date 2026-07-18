@@ -461,9 +461,9 @@ the algorithm ratio and absolute 1080p frame budget both reported.
 5. Update `README.md` to match the final renderer pipeline and add a dedicated
    results document mapping each retained technique to the corresponding Lin
    section or to the voxel-native contribution.
-6. Remove obsolete low-resolution caches, loose root screenshots, stale
-   fallback code, and `VoxelBench` after confirming that no final workflow or
-   evidence depends on them.
+6. Remove obsolete low-resolution caches, loose root screenshots, and stale
+   fallback code after confirming that no final workflow or evidence depends
+   on them. (`VoxelBench` is done — deleted 2026-07-18; history is in git.)
 
 Exit artifact: a reproducible result package and a clean renderer repository,
 whether the central hypothesis succeeds or fails.
