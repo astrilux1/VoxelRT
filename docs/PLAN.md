@@ -1,218 +1,516 @@
-# Plan: Beating Lin 2026 by 2–3× in VoxelRT
+# VoxelRT Project Plan
 
-Working plan as of 2026-07-01. Companion to `STATUS.md` (state of the
-implementation), `RESEARCH_LOOP.md` (measurement discipline), and
-`lin2026-restirptenhanced.pdf` (the golden reference).
+Working plan as of 2026-07-09. This document defines where the project is
+going and the gates for getting there. `STATUS.md` records what has happened;
+`RESEARCH_LOOP.md` defines how experiments are measured; and
+`lin2026-restirptenhanced.pdf` is the reference evaluation protocol.
 
-## 1. Where we are
+## 1. Project goal
 
-- The unified ReSTIR reservoir pipeline is implemented and rendering
-  end-to-end. All Lin 2026 techniques that survive translation to a
-  Lambertian voxel world are in and flag-gated: paired Gaussian spatial
-  reuse (§3), footprint reconnection criterion (§4), duplication-map
-  adaptive cCap (§5), unified DI+GI reservoirs (§6.1), vector shading
-  weights (§6.3), plus a disocclusion-rescue analog of §6.4.
-- Three of the paper's techniques **do not apply here and are already free**:
-  random replay (our reconnection shift has Jacobian ≡ 1 — no replay,
-  so §6.2.2 stream compaction and §6.2.3 forced NEE reconnection are
-  moot), and the hybrid-shift machinery itself. This is the structural
-  advantage the 2–3× claim should be built on.
-- The harness is largely ready: linear HDR readback, cached converged
-  references, HDR-FLIP via `flip-evaluator`, WebGPU `timestamp-query`
-  per-pass timings, smoke/ablation/convergence/paper suites, repeats
-  with dispersion stats.
-- **One open correctness item**: converged `ours` measured ~8–18% darker
-  than converged `base`. The leading cause (offset-origin/unoffset-aim
-  mismatch in `RF_FULLV` visibility rays) was fixed and smoke-tested,
-  but the converged 1080p confirmation has not been run. Nothing above
-  the bias-closure bar in Phase 1 should be trusted until this is done.
+Build a real-time WebGPU path tracer that uses the stable structure of a voxel
+world to reuse global-illumination samples better than a faithful adaptation
+of Lin, Kettunen, and Wyman's 2026 ReSTIR PT Enhanced method.
 
-## 2. The claim, stated precisely
+The primary research target is a measured **2-3x advantage** over the locked
+`lin` baseline in at least one defensible form:
 
-We cannot run their Falcor build on our scenes, so the defensible claim is
-**within-harness**: `ours` vs `lin`, where `lin` is the honest, tuned
-adaptation of their technique set (σ=16, 3 taps, cCap=20, their dupmap
-defaults), measured with their protocol (HDR-FLIP at 1920×1080, GPU
-timestamp pass times, fixed-seed repeats, static + deterministic motion).
-Acceptable denominators (pick whichever is achieved, report all):
+- 2-3x less GPU time at matched HDR-FLIP;
+- 2-3x lower HDR-FLIP at matched cumulative GPU time; or
+- 2-3x less cumulative GPU time to cross a fixed HDR-FLIP threshold.
 
-- ≥2–3× lower HDR-FLIP at matched GPU ms/frame; or
-- ≥2–3× lower GPU ms/frame at matched HDR-FLIP; or
-- ≥2–3× fewer frames to reach a fixed FLIP target.
+The exact denominator must be stated with every result. Equal frame count is
+not a performance claim when the configurations have different frame costs.
+The published Lin 2026 absolute timings are context, not a denominator: this
+project compares `ours` with `lin` inside the same WebGPU renderer, on the same
+machine, scenes, paths, seeds, references, and measurement harness.
 
-Rules that keep it honest:
+The central thesis is not simply "ReSTIR PT in voxels." It is:
 
-- Renderer-wide optimizations (brick occupancy masks, traversal changes,
-  pass fusion of non-ReSTIR stages) must be ON for both `lin` and `ours`
-  or excluded from the claim. They improve absolute ms, not the ratio.
-- `dupmap` is intentionally biased (paper: 3.25% in Kitchen). Bias-bearing
-  configs are reported separately from unbiased ones, like their Fig. 14/15.
-- Every promoted idea gets an ablation row (technique added over the
-  previous row) with per-pass GPU ms and FLIP at fixed budget — Table 1's
-  shape, plus convergence curves (their Fig. 15).
+> Stable voxel, face, and brick identities make world-space GI reuse cheap and
+> persistent. That structure should improve initial sampling, camera-motion
+> reuse, and disocclusion behavior beyond a screen-space ReSTIR adaptation.
 
-## 3. Phase 0 — Re-verify state (half a day)
+The 2-3x target is a hypothesis until the final benchmark campaign proves it.
 
-1. `npm test` green; `--suite smoke` at 1920×1080 renders and captures HDR.
-2. Confirm `timestamp-query` is available on this machine's adapter and
-   FLIP scoring runs (`--install-flip` if needed).
-3. Freeze reference poses: `interior_static`, `interior_move`,
-   `exterior_static`, `exterior_move` references built at 1600 frames and
-   cached under `test/eval/refs`.
+## 2. Definition of done
 
-## 4. Phase 1 — Close the energy-loss bias (gate for everything else)
+The project is complete when all of the following are true:
 
-Target: converged `ours&dupmap=0` matches converged `base` to **>30 dB**
-(denoiser off, uncapped history, same pose, 1920×1080).
+1. **Correctness is closed.** The unbiased variants of `lin` and `ours`
+   converge to the same solution as `base` within a predeclared tolerance.
+   Intentional dupmap bias is measured and reported separately.
+2. **The comparison is reproducible.** A clean checkout can build the frozen
+   references, run the claim suite at 1920x1080, and reproduce tables and
+   convergence data with adapter and runtime provenance attached.
+3. **The baseline is honest.** `lin` uses the paper's applicable defaults and
+   has not been weakened to inflate the ratio. Renderer-wide optimizations are
+   shared by `lin` and `ours`.
+4. **The claimed win survives motion and scene diversity.** Final results
+   include interior, exterior, and heterogeneous-emitter scenes, with static
+   and deterministic camera-motion cases.
+5. **A voxel-native contribution carries the result.** At least one promoted
+   technique relies on stable voxel/brick/face structure rather than being a
+   generic parameter sweep or WebGPU micro-optimization.
+6. **The result is documented honestly.** The final report includes the
+   exact claim, ablations, convergence curves, timing dispersion, bias,
+   failure cases, memory cost, and techniques that were tested and killed.
+7. **The renderer remains usable.** `npm test` is green, the interactive demo
+   still works, and the promoted preset has a documented 1080p GPU frame cost.
+   A 30 FPS GPU budget on the RTX 3080 is the practical floor; 60 FPS is a
+   stretch target, not a substitute for the research claim.
 
-1. Long-converged confirmation of the `fullv` ray-origin fix (the smoke
-   ladders looked clean; this is the real test).
-2. If residual darkening remains, run the flag bisection already sketched:
-   `ours / ours&rclamp=0 / ours&dupmap=0 / ours&rclamp=0&dupmap=0 / lin / gi`,
-   converged, channel means vs `base`. Suspects in order:
-   - `rclampv=24` contribution clamp too low near the emissive ceiling
-     (test `rclamp=0`; if guilty, raise default or make it adaptive —
-     e.g. clamp at k× the running per-pixel mean instead of a constant);
-   - dupmap cCap reduction (legitimately biased — quantify and set aside);
-   - balance-heuristic MIS with visibility-free targets (test `sreuse=0`);
-   - x1 reconstruction mismatch: G-buffer depth measured along the
-     *jittered* primary ray but reuse reconstructs x1 from the unjittered
-     center ray. **Fix regardless of bisection outcome**: store x1 (or the
-     jitter) in the G-buffer. It also unblocks Area-ReSTIR-style ideas later.
-   - firefly-clamp semantics differences (`Lo` clamp vs post-sum clamp).
-3. Re-run the bias check after each fix; record channel means + PSNR in
-   `test/eval` so regressions are visible forever after.
+## 3. Scope and non-goals
 
-## 5. Phase 2 — Baseline measurement campaign (know the starting ratio)
+### In scope
 
-Run the full paper-protocol suite for `base` / `gi` / `lin` / `ours`
-(current flags), all four scenarios, 3+ repeats, FLIP + per-pass GPU ms:
+- Diffuse voxel scenes in the existing 256^3 world at 1/16 m voxel scale.
+- WebGPU/WGSL as the primary implementation and portability boundary.
+- One-sample-per-pixel path tracing with temporal and spatial reservoir reuse.
+- Static geometry plus deterministic camera motion for the claim campaign.
+- Voxel-native sampling, visibility, cache, compression, and scheduling work.
+- Algorithm-only evaluation first; denoised/presented quality as a separate
+  secondary axis.
 
-1. Tune `lin` honestly first (paper defaults; verify σ=16 matches R=30
-   average sample distance; cCap=20; dupmap α=0.1, cMin=1). Any `lin`
-   mis-tuning inflates our ratio and destroys the claim.
-2. Produce the first ablation table (`gi` → +unified → +paired →
-   +footprint → +dupmap → +vector → each `ours` flag) and convergence
-   curves. This tells us the current `ours`/`lin` ratio and how much
-   headroom each Phase 3 idea must contribute.
-3. Decide equal-time operating points (e.g. the GPU ms/frame of `lin` at
-   default settings) and pin them for all subsequent comparisons.
+### Out of scope until the primary claim is resolved
 
-## 6. Phase 3 — Research directions (all ideas, ranked)
+- Porting the renderer to Falcor for an absolute-time comparison.
+- Glossy/specular material support solely to mirror hybrid shift mapping.
+- Dynamic brick transforms, voxel physics, and general scene streaming.
+- A native CUDA/DXR backend or Tensor Core path. Matrix hardware is relevant
+  only if a later neural-cache or reconstruction workload is dense enough to
+  justify it; DDA traversal and visibility are not that workload.
+- Counting renderer-wide traversal or pass-fusion wins in the `ours`/`lin`
+  algorithm ratio. Those changes may improve the product, but both sides must
+  receive them.
 
-One hypothesis at a time, each behind a flag, smoke-gated then promoted
-per `RESEARCH_LOOP.md`. Promotion bar: ≥5% FLIP improvement at equal time
-(or equal FLIP at ≥5% less time) on at least two scenarios, no scenario
-regressing >2%. Kill fast; record kills in STATUS.md so they aren't retried.
+## 4. Current state
 
-### Tier 1 — cheap, high-confidence (do first, in this order)
+The project has a serious experimental foundation, but it has not yet proved
+the headline result.
 
-1. **Measure `lightpower`** (already implemented, `RF_LIGHTPOWER`): alias
-   table over emitted luminance vs uniform face sampling. Expected: big
-   win in interior scenes with heterogeneous emitters; near-zero cost.
-2. **Widened same-plane pairing σ.** Plane-exact validation (`RF_PLANE`)
-   removes the blur/bias penalty that normally limits reuse radius. Sweep
-   σ ∈ {16, 24, 32, 48} with plane validation on; also try *mixed* taps
-   (e.g. two σ=16 textures + one σ=48) so near reuse handles detail and far
-   reuse handles low-frequency GI. Voxel-specific; Lin cannot do this.
-3. **Adaptive RIS candidate budgets.** Scale NEE candidate count with
-   light count and receiver-to-light distance (paper uses a fixed 32 with
-   inverse-square bounce decay). Keeps equal-time comparisons honest and
-   shifts samples where they matter.
-4. **Reservoir-confidence-driven denoising.** Feed reservoir confidence
-   `c` and the dup score into à-trous strength and temporal history cap
-   instead of raw history length. Cheap (uniforms + one texture read),
-   attacks the presented-image quality axis. Report algorithm-only and
-   denoised results separately.
-5. **Sweep `fpc`** (ours default 0.0008 vs paper's τ/100 = 0.0002): the
-   footprint criterion matters less in a Lambertian world, but a wrong
-   default silently costs reuse acceptance.
+### Working foundation
 
-### Tier 2 — bigger bets, voxel-native (the actual research)
+- `base`, `gi`, `lin`, and `ours` presets render end-to-end.
+- The Lin-applicable algorithm set is implemented: unified DI/GI reservoirs,
+  paired Gaussian spatial reuse, duplication-map history control, and vector
+  shading weights. The paper's footprint reconnection criterion is retained as
+  a negative ablation, not a default: it requires the hybrid shift's later-
+  vertex replay fallback, which this Lambertian x2-only representation lacks.
+- Voxel-specific receiver reconstruction now recovers the exact primary voxel
+  plane. This removed the former false-visibility quality gap.
+- The null-reservoir conditional-mean error and fp16 long-accumulation drift
+  were found and fixed. Float32 accumulation is used when supported.
+- The harness captures linear HDR, computes HDR-FLIP, records per-pass WebGPU
+  timestamp data, logs adapter/runtime provenance, and emits repeat-aware
+  CSV/JSON summaries.
+- Benchmarks use 1920x1080, six operating bounces, and twelve-bounce reference
+  paths by default.
+- Static and motion scenarios exist for the default interior/exterior scene;
+  a heterogeneous-emitter `lamps` scene is also available.
+- A versioned correctness manifest and fail-closed `bench:correctness` suite
+  now bind estimator checks to the frozen claim references.
 
-6. **Per-brick light reservoirs (ReGIR-style world-space light grid).**
-   Precompute per-brick (or per 4³-brick-cluster) light CDFs / reservoirs
-   over the emissive face list, refreshed per frame with a handful of
-   samples; initial NEE candidates draw from the local structure instead
-   of the global alias table. The voxel grid makes cell assignment free.
-   Expected: the single biggest DI win in interiors with many emissive
-   faces; this is our analog of their light tiles (§6.1) but world-space
-   and occlusion-aware over time.
-7. **World-space (voxel-face) reservoir cache.** Store reservoirs keyed
-   by voxel face in addition to per-pixel — a natural world-space hash no
-   triangle renderer gets for free. Temporal reuse then survives camera
-   motion and disocclusion trivially (a newly-visible surface already has
-   a world-space reservoir). Start with GI reservoirs only (x2 `Lo`
-   samples), merge world→screen with proper MIS. High risk/high reward;
-   could subsume `rescue`.
-8. **Intra-face sample mutation for decorrelation.** The dupmap trades
-   correlation for bias. In a voxel world we can instead *mutate* a
-   duplicated sample: jitter the reconnection point within the same
-   emissive face / same surface plane. Area-measure target re-evaluation
-   is exact and cheap (Jacobian 1 on the plane), so this decorrelates
-   without touching MIS partition of unity — i.e. **decorrelation without
-   the dupmap's darkening bias**. If it works, it replaces dupmap in the
-   unbiased config and is a paper-worthy result on its own (cheap
-   alternative to Sawhney et al.'s MCMC mutations).
-9. **Pass fusion / bandwidth reduction.** At 1080p on WebGPU these passes
-   are memory-bound: fuse dupmap into spatial reuse (it already reads the
-   same reservoirs), consider fusing temporal-reuse into pathtrace tail.
-   Measure with per-pass timestamps; renderer-wide, so apply to both
-   `lin` and `ours` (improves absolute ms, keeps ratio honest).
-10. **True dual motion vectors (§6.4).** The 3×3 rescue is an analog, not
-    the technique. With `benchmove` strafes, disocclusion noise is a real
-    term in the motion scenarios; implement occluder-relative reprojection
-    and compare against `rescue` directly.
+### Evidence so far
 
-### Tier 3 — stretch / opportunistic
+- The large historical energy deficit is obsolete; it came from multiple
+  correctness and reference problems that have since been fixed.
+- Voxel-exact receiver reconstruction was a large shared correctness/quality
+  win and must remain enabled for every comparison.
+- Short 32-frame, three-repeat smoke runs give `sigma=32` the only stable
+  Tier-1 signal so far, but the gain is small and not claim-bearing.
+- `adaptcand` and the current `lightgrid` have shown scene-dependent equal-frame
+  improvements, but equal-time convergence evidence is still missing.
+- `lightpower` has not helped in the tested scenes. `mixsigma`, `rclamp`, and
+  the current mutation prototype have not earned promotion yet.
+- The full six-scenario unclamped (`fclamp=0`) twelve-bounce reference set
+  passes its 800-to-1600-frame convergence gate. The earlier clamped reference
+  contract was invalidated because base and ReSTIR modes applied the clamp at
+  different estimator stages.
+- The permanent static correctness gate is green: all 15 rows pass with reuse
+  estimators on the paper-consistent unbiased path (`treuse=0`, fresh plus
+  spatial reuse, uncapped accumulation). Maximum channel-mean drift is 0.682%
+  interior, 0.821% exterior, and 0.910% lamps; minimum HDR PSNR is 47.73 dB.
+  The faithful real-time `lin` path keeps temporal reuse and `cCap=20`, and is
+  correctly treated as biased rather than mislabeled as an unbiased estimator.
+- Pre-spatial temporal-history isolation is promoted as an explicit motion-only
+  `ours_motion` preset. It improves repeated 96-frame HDR-FLIP by 18.2% on
+  exterior motion and 5.5% on lamps motion at about 0.3-1.1% median GPU cost;
+  it remains off for static sequences because early static FLIP regresses.
+- The footprint flag alone produced about 5.1% lamps-scene darkening. Removing
+  it from the applicable preset reduces `lin_unbiased` to about 1.8% low; do
+  not re-enable it without a real replay/later-reconnection fallback.
 
-11. **Reservoir compression to 16 B/pixel** (paper went 88→64; we are at
-    32): pack `Lo` as RGB9E5, x2 as grid coords + face id + 2×8-bit
-    in-face UV. Halves reuse-pass bandwidth; pairs well with idea 9.
-12. **Blue-noise / stratified initial-candidate seeds.** Paper's
-    conclusion: quality is bounded by initial sampling. Spatiotemporal
-    blue-noise masks for candidate RNG are drop-in and measurable.
-13. **WebGPU subgroups** (where available) for reservoir merges and dupmap
-    counting; gate on adapter feature, keep a fallback path.
-14. **Half-res reservoir passes + full-res shade.** Reuse at half
-    resolution, shade per-pixel with the plane-exact validation catching
-    mismatches. Risky for detail; cheap to prototype with `scale`.
-15. **Hierarchical empty-space skipping beyond brick masks** (coarse
-    macro-mask or distance field). Renderer-wide; absolute ms only.
-16. **Area-ReSTIR-lite subpixel reuse.** Once x1/jitter lives in the
-    G-buffer (Phase 1), evaluate whether subpixel-aware temporal reuse
-    reduces edge shimmer under motion. Their future-work section points
-    here; smallest useful slice only.
+### Present blockers
 
-### Explicitly not doing
+1. The honest current `lin` versus `ours` equal-time ratio is not yet frozen.
+2. The cumulative `ours` preset contains ideas that have not all passed an
+   ablation gate.
+3. The strongest voxel-native idea - persistent world-space GI reservoirs -
+   is not implemented.
 
-- Porting to Falcor for apples-to-apples (protocol replication is the
-  pragmatic equivalent — already agreed in STATUS.md).
-- Glossy/specular BSDFs to exercise the hybrid shift — out of scope; the
-  Lambertian specialization *is* the thesis.
-- MCMC mutations (Sawhney 2024) as-published — expensive; idea 8 is the
-  cheap voxel-native replacement.
+### What the paper changes about the research priority
 
-## 7. Phase 4 — Consolidation and writeup
+ReSTIR PT Enhanced's headline speedup is cumulative, not one sampling trick:
+Table 1 moves from 35.73 ms to 13.04 ms (2.74x) through code micro-optimization,
+forced NEE reconnection, replay compaction, paired reuse, Russian roulette, and
+DI/GI unification; the quality/robustness additions raise the final cost to
+15.53 ms while retaining a 2.30x speedup. Most replay/divergence savings do not
+exist in this analytic Lambertian WebGPU shift, so VoxelRT must not assume that
+the paper's ratio transfers. The within-renderer `lin` denominator remains the
+only defensible one.
 
-1. Final ablation table + convergence curves + repeated-run statistics
-   for the surviving technique set; static and motion scenarios; biased
-   and unbiased variants reported separately.
-2. State the achieved ratio with its exact denominator; include failure
-   cases (scenes/poses where the ratio dips) — the claim dies without them.
-3. Update README (pipeline description is stale), write the results doc
-   with the technique→paper-section mapping table.
-4. Delete VoxelBench (its own rnd-log documents its techniques failing
-   visual review; nothing in `pipeline/` is load-bearing).
+The paper's conclusion says quality is bounded by initial sampling and that
+high-frequency motion remains difficult, pointing toward Area ReSTIR. After
+correctness closes, VoxelRT therefore prioritizes two structural extensions:
+better voxel-aware initial proposals and persistent brick/face-keyed GI reuse
+that survives disocclusion and camera return. Wider pairing remains a small
+candidate, not the central thesis.
 
-## 8. Standing discipline
+## 5. Measurement contract
 
-- The loop in `RESEARCH_LOOP.md` governs: one flag per hypothesis, smoke
-  first, promote only via fixed-seed equal-time/equal-error evidence.
-- Never conclude from sub-1080p runs; never conclude from wall clock when
-  timestamps are available.
-- After any change touching sampling or visibility, re-run the Phase 1
-  bias check before trusting new FLIP numbers — energy loss shows up as
-  "better FLIP" long before it shows up as an artifact.
-- Keep STATUS.md current: every kill, every promotion, every retuned
-  default gets a line, so the next session starts where this one ended.
+The measurement contract is part of the implementation. It must be frozen
+before optimizing against it.
+
+### Locked baselines
+
+- `base`: plain one-sample-per-pixel voxel path tracing.
+- `gi`: minimal ReSTIR GI-style temporal/spatial reuse.
+- `lin`: faithful translation of applicable Lin 2026 techniques.
+- `ours_unbiased`: promoted VoxelRT techniques with dupmap and any other known
+  bias source disabled.
+- `ours`: the real-time configuration, which may include measured intentional
+  bias if that improves short-time perceptual quality.
+
+`lin` starts with the paper's applicable defaults: three spatial neighbors,
+`sigma=16` corresponding to radius 30, and `cCap=20`. Any retuning must use a
+predeclared sweep that is also available to `ours` and must be recorded.
+
+### Claim matrix
+
+All claim-bearing rows use:
+
+- 1920x1080 at render scale 1;
+- six-bounce real-time configurations;
+- cached `base`, denoiser-off references with twelve bounces and a locked
+  high-convergence frame budget (initial target: 1600 frames);
+- `interior_static`, `interior_move`, `exterior_static`, `exterior_move`,
+  `lamps_static`, and `lamps_move`;
+- linear HDR before tonemapping;
+- HDR-FLIP as the headline metric;
+- HDR MSE/RMSE, relative error, channel means, and HDR PSNR for diagnosis;
+- GPU timestamp-query time and per-pass time as cost; wall time is reported
+  but is not the headline denominator;
+- recorded adapter, browser/backend, OS, launch flags, feature set, and
+  timestamp-query availability.
+
+Final timing rows use at least five warmed repeats. Final quality rows use
+independent sampling seeds: at least 16 for static captures and 32 for motion
+captures. If a bias or correlation claim depends on the mean across runs,
+scale the motion set toward 64 seeds. Report confidence intervals or bootstrap
+intervals in addition to mean/median/dispersion.
+
+### Correctness tolerances
+
+Before the baseline campaign, add a dedicated correctness suite and freeze its
+thresholds. The initial gate is:
+
+- denoiser off and effectively uncapped temporal accumulation;
+- `lin` and `ours` tested without dupmap or other intentional bias;
+- estimator configurations at eight bounces against the twelve-bounce
+  reference, so the remaining depth mismatch is small and shared;
+- mean RGB energy within 1% of the reference on each claim scene;
+- greater than 30 dB HDR PSNR against the corresponding converged baseline;
+- no structured residual that grows with frame count or camera motion.
+
+If reference variance prevents those thresholds, increase the reference and
+seed budgets instead of weakening the gate after seeing a result.
+
+### Fairness rules
+
+- Correctness fixes shared by all estimators are not `ours` contributions.
+- Claim references and unbiased rows use `fclamp=0`; the interactive firefly
+  clamp is a product-quality option and cannot silently enter convergence data.
+- Brick masks, traversal changes, generic pass fusion, and generic buffer
+  compression are enabled for both `lin` and `ours` or reported separately.
+- Biased and unbiased variants never share a result row or label.
+- Denoiser changes are evaluated only on the presented-quality axis and never
+  used to support an algorithm-only sampling claim.
+- No conclusion comes from a sub-1080p run, a single seed, equal frames alone,
+  wall clock alone, or a scene selected after results are known.
+
+## 6. Roadmap and gates
+
+| Phase | Purpose | Exit gate |
+| --- | --- | --- |
+| 0 | Freeze the experiment | Claim manifest, full references, and reproducible adapter-verified smoke run |
+| 1 | Close estimator correctness | Unbiased `lin` and `ours` pass the permanent convergence/bias suite |
+| 2 | Establish the real baseline | Honest `lin`/`ours` ablation and equal-time curves quantify the actual gap |
+| 3 | Finish current experiments | Every existing flag is promoted, parked, or killed with evidence |
+| 4 | Build the voxel-native contribution | World-space GI reuse passes correctness and improves static plus motion cases |
+| 5 | Optimize the surviving renderer | Measured bottlenecks fall without compromising comparison fairness |
+| 6 | Prove and publish the result | Frozen multi-scene campaign supports the exact claim and documents failures |
+
+### Phase 0 - Freeze the experiment
+
+1. Add a versioned claim manifest under `test/eval/` containing resolution,
+   scale, scenario poses/motion, operating/reference bounce counts, reference
+   frames, frame checkpoints, seeds, repeats, browser launch settings, and
+   metric versions.
+2. Rebuild all six references at 1920x1080, scale 1, `base`, denoiser off,
+   `fclamp=0`, uncapped history, twelve bounces, and 1600 frames. Preserve
+   metadata beside every capture and reject caches whose query does not match
+   the manifest.
+3. Add an explicit reference-convergence check. Compare 800 versus 1600 frames
+   and extend to 3200 where channel means or HDR error are still moving enough
+   to affect the correctness tolerance.
+4. Make the harness fail closed when the expected NVIDIA hardware adapter,
+   float32 accumulation, timestamp queries, HDR-FLIP installation, or manifest
+   settings are missing. Diagnostic overrides must mark outputs non-claimable.
+5. Separate scratch outputs from durable evidence. Claim artifacts get stable
+   names; one-off PNGs and obsolete low-resolution caches are not kept in the
+   repository root.
+
+Exit artifact: a single documented command can rebuild or validate references
+and run an adapter-verified 1080p smoke suite from a clean checkout.
+
+### Phase 1 - Close estimator correctness
+
+1. Add a `correctness` benchmark suite rather than relying on handwritten
+   query combinations. It must include `base`, `gi`, unified-only, `lin`
+   without dupmap, and `ours` without every intentional bias mechanism.
+2. Run the suite on interior, exterior, and lamps static scenes first, then on
+   the deterministic motion captures.
+3. Track energy by channel, HDR PSNR, relative-error images, and error versus
+   frame count. A clean-looking image is insufficient.
+4. Turn every correctness bug already discovered into a regression check:
+   float32 reference accumulation, null outcomes in MIS partitions, bounce
+   truncation, exact receiver reconstruction, and visibility-ray origin/aim
+   consistency.
+5. Keep the unbiased correctness path separate from the faithful real-time
+   baseline: disable ReSTIR temporal reuse for the former, and retain cCap=20
+   for `lin`. Rerun the suite after changes to sampling, MIS, visibility,
+   reservoir packing, or cache reuse.
+6. Track temporal-plus-spatial correlation and bias in real-time rows rather
+   than turning a finite confidence cap into an unbiasedness claim.
+
+Exit artifact: a checked-in correctness summary that shows unbiased convergence
+and fails automatically when any locked tolerance regresses.
+
+### Phase 2 - Establish the honest baseline
+
+1. Freeze and document the exact `lin` translation, including which paper
+   mechanisms are inapplicable in a Lambertian voxel renderer and therefore
+   absent from both cost and quality comparisons.
+2. Run the additive applicable sequence:
+   `gi -> unified -> paired -> vector -> lin`, with per-pass GPU costs and
+   HDR-FLIP at fixed cumulative GPU-time checkpoints. Report `footprint` as an
+   inapplicable/negative translation ablation and `dupmap` as a separate biased
+   robustness row rather than silently folding either into `lin_unbiased`.
+3. Run `base`, `lin`, `ours_unbiased`, and the current `ours` through full
+   convergence curves. Report equal-time and equal-error interpolations, not
+   only raw checkpoints.
+4. Measure the cost of each current `ours` extension over `lin`. Remove any
+   default-on feature whose benefit cannot be isolated.
+5. Pin the target operating points for subsequent phases. Record how much
+   quality or cost remains to reach 2x and 3x; this gap determines whether
+   incremental tuning can matter or a structural idea is required.
+
+Exit artifact: the first defensible baseline report. It may show no win; its
+purpose is to establish the denominator before further research.
+
+### Phase 3 - Finish the experiments already in the tree
+
+Use the same promotion ladder for each flag:
+
+1. Shader/regression smoke at 1920x1080.
+2. Three-seed, 32-frame direction check on at least two static scenes and one
+   motion scene.
+3. Equal-time convergence comparison through 128 frames with at least five
+   timing repeats and independent quality seeds.
+4. Full claim matrix only if the signal survives.
+
+Default promotion bar: at least 5% lower HDR-FLIP at matched GPU time, or at
+least 5% lower GPU time at matched HDR-FLIP, on two or more core scenarios;
+no core scenario may regress by more than 2% without an explicit configuration
+split and explanation. Small complementary wins may be kept only when a
+cumulative ablation proves their combined value.
+
+Evaluate in this order:
+
+1. **Motion history isolation (promoted configuration split).** Keep
+   `ours_motion` explicit and validate it at additional motion checkpoints;
+   never silently enable it for short static sequences.
+2. **All-tap `sigma=32`.** Promote the only repeat-stable Tier-1 signal to
+   higher-frame static and motion curves. Compare against a fairly retuned
+   `lin`, not only the current `ours` default.
+3. **Adaptive candidates plus the current per-brick light grid.** Test each
+   alone and together at equal time. Inspect where the grid proposals fail;
+   do not increase candidate count to hide a bad proposal distribution.
+4. **Confidence-driven denoising.** Evaluate only with denoising enabled,
+   primarily under motion and disocclusion. Keep separate from sampling rows.
+5. **Intra-face mutation.** Compare `ours&dupmap=0&mutate=1` against both the
+   biased dupmap variant and unbiased no-dupmap variant. Its case must be lower
+   motion correlation without converged energy loss.
+6. **Power sampling, mixed sigma, clamps, and parameter sweeps.** Treat the
+   current weak or negative evidence as a presumption against promotion.
+   Reopen only with a stated failure hypothesis and a scene already present in
+   the claim matrix.
+
+Exit artifact: a compact keep/kill table in `STATUS.md`, a minimal promoted
+`ours` preset, and no ambiguous experimental flags enabled by default.
+
+### Phase 4 - Primary research bet: brick-resident world-space GI reuse
+
+This phase gets the largest research budget because it attacks the core thesis
+and the observed limitation of screen-space reuse: history disappears when a
+surface leaves the image, reappears, or is newly exposed by camera motion.
+
+#### 4A. Design and invariant
+
+1. Define a stable receiver key from brick coordinate plus a small normal/face
+   bucket. Keep the first prototype bounded - for example, one or a few GI
+   reservoirs per active brick and face orientation - rather than allocating a
+   reservoir for every possible voxel face.
+2. Write the exact estimator and merge math before code. A cache miss or null
+   entry must remain a zero-valued outcome in the MIS domain; the project has
+   already demonstrated why dropping nulls creates energy inflation.
+3. Budget memory and bandwidth for both history buffers. Record bytes per
+   brick, total worst-case bytes, clears, update cost, and lookup cost.
+4. Define invalidation now even though claim scenes use static geometry:
+   version each brick so future voxel edits cannot silently reuse stale GI.
+
+#### 4B. Minimal prototype
+
+1. Add a single `worldgi` flag and one new pass or bounded update path. Avoid
+   combining compression, neural scoring, or dynamic geometry in the first
+   implementation.
+2. Seed the cache from validated screen reservoirs and query it as an
+   additional GI proposal at the current receiver. Preserve a screen-only
+   control path with identical non-cache work.
+3. Visualize cache coverage, age, confidence, hit rate, rejected proposals,
+   and world-to-screen contribution so failures are diagnosable.
+4. Prove the cache is inert when empty and unbiased when enabled without any
+   intentional clamp or confidence cap.
+
+#### 4C. Motion and proposal quality
+
+1. Measure first-frame, disocclusion, camera-return, and steady-motion cases.
+   The cache must demonstrate persistence that screen-space history cannot.
+2. Tune spatial granularity, normal buckets, age/decay, and proposal count one
+   dimension at a time. Use hit rate and accepted contribution, not only image
+   error, to explain the result.
+3. Compare world-space cache proposals with the existing light-grid proposal.
+   Keep them conceptually separate: the light grid selects emitters for NEE;
+   the GI cache reuses transported radiance at stable receivers.
+4. Test cache invalidation with synthetic brick edits before claiming that the
+   design can extend to dynamic voxel scenes.
+
+Promotion gate: a correctness-clean world-space cache must improve matched-time
+HDR-FLIP on at least one static and two motion/disocclusion scenarios, with a
+clear cache-coverage explanation and no more than 2% regression elsewhere.
+If it cannot beat the screen-space control after two materially different
+granularity/update designs, stop and document the negative result rather than
+turning it into an unbounded tuning project.
+
+Exit artifact: the project's primary voxel-native ablation, including memory
+cost, cache diagnostics, static/motion convergence curves, and failure cases.
+
+### Phase 5 - Performance engineering after algorithm selection
+
+Profile the promoted pipeline at the locked operating points. Optimize only
+the measured dominant cost.
+
+Priority order:
+
+1. **Reservoir/cache bandwidth.** Pack stable fields, test 16-bit or shared
+   encodings, and quantify quality loss before keeping compression.
+2. **Pass and traffic reduction.** Fuse passes only where inputs, lifetime,
+   and synchronization make the saved bandwidth measurable. Apply generic
+   fusion to both `lin` and `ours`.
+3. **Initial path sampling.** Improve divergence, Russian roulette, light
+   proposals, or blue-noise candidate seeds only when pathtrace timings and
+   proposal diagnostics identify them as limiting.
+4. **Voxel traversal.** Extend occupancy/macro skipping only when traversal
+   remains dominant after reservoir work. Keep runtime branches out of the
+   inner DDA loop unless profiling proves their value.
+5. **WebGPU subgroups.** Use only behind feature detection and only after a
+   representative adapter shows a repeatable end-to-end win.
+
+Stop any micro-optimization that saves less than 3% end-to-end GPU time after
+repeat variance, unless it removes substantial memory or simplifies the code.
+
+Exit artifact: a cost breakdown before/after each retained optimization, with
+the algorithm ratio and absolute 1080p frame budget both reported.
+
+### Phase 6 - Final proof, writeup, and cleanup
+
+1. Freeze code, presets, claim manifest, references, browser/backend version,
+   and hardware configuration before the final campaign.
+2. Run the full seed/repeat matrix without retuning after seeing results.
+3. Produce:
+   - additive technique ablation table;
+   - HDR-FLIP versus cumulative GPU-time curves;
+   - matched-error and matched-time ratios with intervals;
+   - per-pass GPU cost and memory tables;
+   - biased versus unbiased convergence plots;
+   - static versus motion breakdown;
+   - representative images and residual/error visualizations;
+   - failure cases and killed hypotheses.
+4. State the strongest claim the data supports. If the result is 1.4x, report
+   1.4x; do not preserve a 2-3x title after the evidence rejects it.
+5. Update `README.md` to match the final renderer pipeline and add a dedicated
+   results document mapping each retained technique to the corresponding Lin
+   section or to the voxel-native contribution.
+6. Remove obsolete low-resolution caches, loose root screenshots, stale
+   fallback code, and `VoxelBench` after confirming that no final workflow or
+   evidence depends on them.
+
+Exit artifact: a reproducible result package and a clean renderer repository,
+whether the central hypothesis succeeds or fails.
+
+## 7. Immediate execution queue
+
+These are the next actions, in order:
+
+1. [x] Finish and verify the benchmark-default work (`bounces=6`) without
+   disturbing the pre-existing uncommitted status/harness changes.
+2. [x] Add the versioned claim manifest, strict preflight, motion-pose cache
+   keying, and reference-convergence validation.
+3. [x] Run `npm.cmd run bench:references` to build and validate high-convergence
+   unclamped twelve-bounce references for all six scenarios.
+4. [x] Add the permanent estimator-correctness suite and checked-in report.
+5. [x] Correct the unbiased contract to disable ReSTIR temporal reuse, pass all
+   15/15 correctness rows, and retain cCap=20 only in the faithful real-time
+   baseline.
+6. [ ] Run the locked `base`/`gi`/`lin`/`ours_unbiased`/`ours` baseline campaign.
+7. [ ] Promote or kill `sigma=32`, `adaptcand+lightgrid`, `confdenoise`, and
+   `mutate` using the Phase 3 ladder.
+8. [ ] Reduce the default `ours` preset to promoted techniques only.
+9. [x] World-space GI cache: implemented, tested, and **killed with evidence**
+   (`docs/WORLDGI.md`, STATUS 2026-07-18). Three designs (everywhere/uncapped →
+   catastrophic-blocky; capped + plane-exact key → ~2× worse; disocclusion-gated
+   → neutral) plus a camera-return probe all failed to beat the screen-only
+   control. Root cause: screen reuse here already recovers disocclusions in ~2
+   frames. Code kept flag-gated and off by default as evidence. Redirect: the
+   bottleneck is initial sampling, not reuse persistence (see below).
+10. [ ] Voxel-aware initial proposals (the redirected primary bet): extend the
+   ReGIR-style `lightgrid` toward better initial candidate distributions;
+   measure against a fairly retuned `lin`. This is where the paper says quality
+   is bounded and where the world-cache result says the remaining gap lives.
+
+Do not start final optimization or broaden into dynamic voxel systems until
+the baseline and correctness gates make experiment results trustworthy.
+
+## 8. Decision log and document ownership
+
+- `PLAN.md` changes only when the goal, scope, phase order, or gates change.
+- `STATUS.md` is the chronological handoff: current evidence, exact commands,
+  promoted ideas, killed ideas, and next action.
+- `RESEARCH_LOOP.md` owns measurement rules shared by every experiment.
+- `test/eval/claim-manifest.*` will own claim-bearing machine parameters.
+- Generated benchmark files are evidence only when their metadata matches the
+  frozen manifest; otherwise they are scratch results.
+
+Every experiment ends in one of four states: **promoted**, **parked with a
+specific missing test**, **killed with evidence**, or **invalid because a gate
+failed**. "Interesting" is not a durable project state.
