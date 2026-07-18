@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { canonicalBytes } from './claim-manifest.mjs';
 
 function assert(condition, message) {
   if (!condition) throw new Error(`invalid correctness manifest: ${message}`);
@@ -10,7 +11,7 @@ function same(a, b) {
 }
 
 export async function loadCorrectnessManifest(path) {
-  const raw = await readFile(path);
+  const raw = canonicalBytes(await readFile(path));
   const data = JSON.parse(raw.toString('utf8'));
   validateCorrectnessManifest(data);
   return {

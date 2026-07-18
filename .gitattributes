@@ -1,0 +1,10 @@
+# The claim/correctness gate hashes manifest bytes, and reference caches are
+# keyed by that hash (test/eval/refs/*_cm1_<sha12>.*). A CRLF-converting
+# checkout changes those bytes and fails the gate closed, so text is checked
+# out LF everywhere regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Reference captures and papers are binary; never transform them.
+*.png binary
+*.pdf binary
+*.rgbf32 binary

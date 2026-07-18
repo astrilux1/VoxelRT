@@ -9,8 +9,18 @@ function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+// The manifest identity is a hash of its *content*, not of whatever bytes a
+// particular checkout produced. Without this normalization a CRLF-converting
+// clone (git core.autocrlf=true on Windows) yields a different digest for an
+// identical manifest, which fails the gate closed and orphans every reference
+// cache keyed by the old digest. LF is the canonical form; .gitattributes
+// keeps the working tree matching it too.
+export function canonicalBytes(raw) {
+  return Buffer.from(raw.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+}
+
 export async function loadClaimManifest(path) {
-  const raw = await readFile(path);
+  const raw = canonicalBytes(await readFile(path));
   const data = JSON.parse(raw.toString('utf8'));
   validateClaimManifest(data);
   return {
