@@ -73,12 +73,16 @@ export function makePairingTexture(S, sigma, seed) {
 // (Lin 2026 footnote 3); must match pairSize()/pairOff() in reuse_spatial.wgsl.
 export const PAIRING_SIZES = [254, 230, 210];
 
-export function makePairingBuffer(sigma) {
+// `sigmas` holds one σ per PAIRING_SIZES entry so a single tap can be built
+// wider than the others (RF_MIXSIGMA). A σ whose Gaussian tail exceeds ±S/2
+// simply folds back through the delta wrap above — the construction tolerates
+// this (pairs stay mutual and self-inverting; only the far tail tiles).
+export function makePairingBuffer(sigmas) {
   const total = PAIRING_SIZES.reduce((a, s) => a + s * s, 0);
   const buf = new Uint32Array(total);
   let off = 0;
   PAIRING_SIZES.forEach((S, i) => {
-    buf.set(makePairingTexture(S, sigma, 0xc0ffee + i * 7919), off);
+    buf.set(makePairingTexture(S, sigmas[i], 0xc0ffee + i * 7919), off);
     off += S * S;
   });
   return buf;

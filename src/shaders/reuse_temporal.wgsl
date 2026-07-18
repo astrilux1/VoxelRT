@@ -12,6 +12,18 @@
 //
 // The merge itself needs no Jacobian: point samples live in area measure and
 // direction samples shift by identity.
+//
+// RF_MUTATE (ours): instead of (or in addition to) cutting confidence, the
+// merged reservoir can be *decorrelated without bias* by one intra-face
+// Metropolis-Hastings mutation step (cf. Sawhney et al. 2024, made cheap here
+// because emitted radiance is constant across an emissive voxel face and the
+// reconnection shift has Jacobian 1). Triggered with probability equal to the
+// pixel's duplication score; the sample point is jittered within its emissive
+// face, accepted with the MH ratio of the pipeline's resampling target (times
+// one-DDA-ray visibility), and the contribution weight is rescaled by
+// p-hat(y)/p-hat(y') so the pair (y, W) stays GRIS-unbiased:
+//   E[W * (p-hat(y)/p-hat(y')) * f(y')] = integral of f
+// for any MH kernel that preserves p-hat. Confidence is left unchanged.
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(4) var gbufCur  : texture_2d<f32>;
@@ -19,6 +31,9 @@
 @group(0) @binding(7) var<storage, read_write> reservoirsA : array<Reservoir>;
 @group(0) @binding(9) var<storage, read> reservoirsB : array<Reservoir>;
 @group(0) @binding(12) var dupTex  : texture_2d<f32>;
+// World-space GI reuse cache (RF_WORLDGI): consulted only on disocclusion,
+// where screen-space temporal history is absent (docs/WORLDGI.md).
+@group(0) @binding(15) var<storage, read> worldGi : array<Reservoir>;
 
 fn validPrev(prevPix : vec2<i32>, dims : vec2<i32>, worldPos : vec3<f32>, n1 : vec3<f32>) -> bool {
   if (any(prevPix < vec2<i32>(0)) || any(prevPix >= dims)) { return false; }
@@ -28,6 +43,98 @@ fn validPrev(prevPix : vec2<i32>, dims : vec2<i32>, worldPos : vec3<f32>, n1 : v
   let depthOk = abs(pg.w - expectedT) < 0.08 * expectedT + 0.02;
   let normalOk = dot(pg.xyz, n1) > 0.9;
   return depthOk && normalOk;
+}
+
+// Triangle-wave fold of x into [0,1]: reflection at both edges (period-2
+// fold). Reflection composes a symmetric jitter kernel with a
+// measure-preserving map of the face onto itself, so the folded proposal
+// density stays symmetric: q(y -> y') = q(y' -> y), and the plain MH ratio
+// applies without a proposal correction.
+fn reflect01(x : f32) -> f32 {
+  let w = x - 2.0 * floor(x * 0.5);   // w in [0, 2)
+  return select(w, 2.0 - w, w > 1.0);
+}
+
+// One DDA visibility ray from the receiver, matching the fixed RF_FULLV
+// pattern in pathtrace/reuse_spatial: the ray starts at the receiver's
+// *offset* surface point and the aim vector is computed from that same
+// offset point (aiming with the unoffset x1 falsely self-occludes points).
+fn mutVisible(pt : vec3<f32>, x1 : vec3<f32>, n1 : vec3<f32>) -> bool {
+  let surf = x1 + n1 * 1e-3;
+  let d = pt - surf;
+  let r = length(d);
+  if (r < 2e-3) { return true; }
+  return !traceShadow(surf, d / r, r - 2e-3);
+}
+
+// RF_MUTATE: one Metropolis-Hastings mutation of the merged reservoir sample
+// within its emissive voxel face (see header). Applies only to SK_POINT
+// samples that store the face-constant emitted radiance Le; everything else
+// is returned unchanged. On acceptance the sample point moves and W is
+// rescaled by p-hat(y)/p-hat(y'); confidence, radiance, normal and seed are
+// never touched.
+fn mutateOnEmissiveFace(selIn : Sample, x1 : vec3<f32>, n1 : vec3<f32>) -> Sample {
+  var sel = selIn;
+  if (sel.kind != SK_POINT) { return sel; }
+
+  // Identify the voxel that owns the sampled face: the solid side of the
+  // face plane sits half a voxel against the stored (axis-aligned, exactly
+  // oct-roundtripped) face normal.
+  let pv = sel.pos * INV_VOXEL;
+  let ivox = vec3<i32>(floor(pv - sel.n * 0.5));
+  if (any(ivox < vec3<i32>(0)) || any(ivox >= vec3<i32>(GRID))) { return sel; }
+  let mat = unpackMaterial(voxelAt(ivox));
+  if (mat.emissive <= 0.0) { return sel; }
+
+  // Sample-class check. Only light-list NEE samples carry the face-constant
+  // Le; a BSDF bounce sample that merely landed on an emissive voxel stores
+  // a stochastic path estimate of Lo that is NOT constant across the face
+  // and must not be moved. Le quantized through the reservoir's f16 packing
+  // equals the stored radiance exactly for the NEE class.
+  let le = mat.albedo * (mat.emissive * EMISSIVE_SCALE);
+  let leQ = vec3<f32>(unpack2x16float(pack2x16float(le.rg)),
+                      unpack2x16float(pack2x16float(vec2<f32>(le.b, 0.0))).x);
+  if (any(sel.rad != leQ)) { return sel; }
+
+  // MH target p-hat = the pipeline's scalar resampling target for this class
+  // (evalTarget: luminance of the visibility-free area-measure integrand,
+  // including its distance clamping) times binary receiver visibility.
+  // p-hat(y) == 0 (zero target or occluded): skip the mutation entirely.
+  let pCur = evalTarget(sel, x1, n1);
+  if (pCur <= 0.0) { return sel; }
+  if (!mutVisible(sel.pos, x1, n1)) { return sel; }
+
+  // Symmetric proposal: uniform square jitter of half-width params5.w
+  // (?mutscale=, in units of the face size) in the face tangent plane,
+  // reflected at the face edges to stay on the face. The normal-axis
+  // coordinate is left untouched so the point stays exactly on the plane.
+  var axis = 2u;
+  if (abs(sel.n.x) > 0.5) { axis = 0u; } else if (abs(sel.n.y) > 0.5) { axis = 1u; }
+  let t1 = (axis + 1u) % 3u;
+  let t2 = (axis + 2u) % 3u;
+  let jit = (rand2() * 2.0 - 1.0) * u.params5.w;
+  var q = pv;
+  q[t1] = f32(ivox[t1]) + reflect01(pv[t1] - f32(ivox[t1]) + jit.x);
+  q[t2] = f32(ivox[t2]) + reflect01(pv[t2] - f32(ivox[t2]) + jit.y);
+
+  // Re-encode the proposal into the reservoir's stored representation FIRST
+  // and evaluate the MH ratio on the decoded result: stationarity must hold
+  // on exactly the states the reservoir can represent, or quantization
+  // breaks the invariant distribution.
+  var prop = sel;
+  prop.pos = q * VOXEL_SIZE;
+  let propQ = unpackReservoir(packReservoir(prop));
+  let pProp = evalTarget(propQ, x1, n1);
+
+  // Accept with a = min(1, p-hat(y')/p-hat(y)); the proposal's visibility
+  // ray is only worth tracing when its visibility-free target is nonzero.
+  if (pProp > 0.0 && mutVisible(propQ.pos, x1, n1)) {
+    if (rand() * pCur < pProp) {
+      sel.pos = propQ.pos;
+      sel.W = sel.W * (pCur / pProp);   // contribution-weight rescale
+    }
+  }
+  return sel;
 }
 
 @compute @workgroup_size(8, 8)
@@ -44,8 +151,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   initRng(gid.xy, u.params0.x ^ 0x5f356495u);
 
   let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
-  let x1 = u.camPos.xyz + cameraRay(uv) * g.w;
   let n1 = g.xyz;
+  let x1 = receiverPoint(u.camPos.xyz, cameraRay(uv), g.w, n1);
 
   // Reproject into the previous frame.
   let prevClip = u.prevViewProj * vec4<f32>(x1, 1.0);
@@ -69,17 +176,63 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
     }
   }
-  if (!found) { return; }
+  if (!found) {
+    // Disocclusion: no screen-space history to merge. This is exactly where a
+    // persistent world-space GI reservoir should help — the surface may be
+    // freshly exposed on screen but was seen before and still lives in its
+    // brick/face cell. Merge that cached sample into the fresh initial
+    // reservoir (confidence-capped GRIS, same math as the history merge). The
+    // cache is confined to this branch so it never blurs the well-converged
+    // bulk: applied everywhere it produces piecewise-constant, brick-blocky GI
+    // (measured; see docs/WORLDGI.md §7.4). Applied only where the alternative
+    // is a lone 1-spp sample, a low-noise cached estimate is a net win.
+    if (rflag(RF_WORLDGI)) {
+      let wc = unpackReservoir(worldGi[worldCellIndex(x1, n1)]);
+      if (wc.kind != SK_NONE) {
+        let sc = unpackReservoir(reservoirsA[pixIdx]);
+        let cF = sc.c;
+        let cW = select(wc.c, min(wc.c, u.params6.y), u.params6.y > 0.0);
+        let pF = evalTarget(sc, x1, n1);
+        let pW = evalTarget(wc, x1, n1);
+        let mDen = max(cF + cW, 1e-3);
+        let wF = (cF / mDen) * pF * max(sc.W, 0.0);
+        let wW = (cW / mDen) * pW * max(wc.W, 0.0);
+        let wTot = wF + wW;
+        if (wTot > 0.0) {
+          var merged = sc;
+          var mP = pF;
+          if (rand() * wTot >= wF) { merged = wc; mP = pW; }
+          if (mP > 0.0) {
+            merged.W = wTot / mP;
+            merged.c = cF + cW;
+            reservoirsA[pixIdx] = packReservoir(merged);
+          }
+        }
+      }
+    }
+    return;
+  }
 
   let prevIdx = u32(prevPix.y) * dims.x + u32(prevPix.x);
+  // A null history still participates in the merge (with pT = 0): both the
+  // fresh and the history technique must count their zero-valued outcomes,
+  // or the chain converges to the conditional mean E[w | sample found] and
+  // inflates energy by 1/(1-q) (measured +165% in `gi`). Null reservoirs
+  // carry pooled confidence for exactly this purpose.
   let st = unpackReservoir(reservoirsB[prevIdx]);
-  if (st.kind == SK_NONE) { return; }
+
+  // Duplication score at the reprojected pixel — shared lookup for the
+  // adaptive cCap (§5) and the RF_MUTATE trigger (the dupmap pass is
+  // dispatched whenever either flag is on).
+  var dupScore = 0.0;
+  if (rflag(RF_DUPMAP) || rflag(RF_MUTATE)) {
+    dupScore = clamp(textureLoad(dupTex, prevPix, 0).x, 0.0, 1.0);
+  }
 
   // Adaptive confidence cap from the duplication score (§5).
   var cap = u.params3.x;
   if (rflag(RF_DUPMAP)) {
-    let d = clamp(textureLoad(dupTex, prevPix, 0).x, 0.0, 1.0);
-    cap = mix(u.params3.x, u.params3.y, pow(d, u.params3.z));
+    cap = mix(u.params3.x, u.params3.y, pow(dupScore, u.params3.z));
   }
   let cT = min(st.c, cap);
 
@@ -94,7 +247,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let wC = (cC / mDen) * pC * max(sc.W, 0.0);
   let wT = (cT / mDen) * pT * max(st.W, 0.0);
   let wSum = wC + wT;
-  if (wSum <= 0.0) { return; }
+  if (wSum <= 0.0) {
+    // Pooled null: no candidate survives, but the merged confidence must —
+    // it is what down-weights lucky samples against the zero outcomes.
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = cC + cT;
+    reservoirsA[pixIdx] = packReservoir(nullOut);
+    return;
+  }
 
   var sel = sc;
   var selP = pC;
@@ -106,5 +267,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   sel.W = wSum / selP;
   sel.c = cC + cT;
+
+  // RF_MUTATE: MCMC decorrelation of the merged reservoir before spatial
+  // reuse. Trigger probability = the pixel's duplication score (dup = 0
+  // never mutates), so mutation effort goes exactly where correlation is.
+  if (rflag(RF_MUTATE) && rand() < dupScore) {
+    sel = mutateOnEmissiveFace(sel, x1, n1);
+  }
+
   reservoirsA[pixIdx] = packReservoir(sel);
 }

@@ -17,12 +17,21 @@ struct Uniforms {
   prevCamPos   : vec4<f32>,   // xyz = previous frame position
   sunDir       : vec4<f32>,   // xyz = direction TO the sun, w = cos(angular radius)
   sunRadiance  : vec4<f32>,   // rgb = sun irradiance E, w = sky intensity
-  params0      : vec4<u32>,   // x = frame index, y = indirect bounce count, z = flags, w = unused
+  params0      : vec4<u32>,   // x = frame index, y = indirect bounce count,
+                              // z = flags (bit 0 = temporal accum on, bit 1 = denoise
+                              // active — gates presented-path-only features), w = unused
   params1      : vec4<f32>,   // x = render width, y = render height, z = exposure, w = unused
   params2      : vec4<u32>,   // x = restir flags, y = light face count, z = spatial taps, w = unused
   params3      : vec4<f32>,   // x = cCap, y = cCapMin, z = dup alpha, w = footprint c
   params4      : vec4<f32>,   // x = spatial sigma/radius (px), y = max accum history,
                               // z = contribution clamp, w = unused
+  params5      : vec4<f32>,   // x = wide pairing sigma2 (px), y = adaptive candidate scale,
+                              // z = confidence-denoise strength, w = mutation scale
+  params6      : vec4<f32>,   // x = light-grid candidates per cell (?gridcand=;
+                              // currently unused — RF_LIGHTGRID samples the full
+                              // fixed K=16 per-cell table),
+                              // y = world-GI cache confidence cap (?wgicap=; 0 =
+                              // uncapped), zw = reserved
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -41,6 +50,13 @@ const RF_RESCUE    : u32 = 512u;   // ours: disocclusion history rescue (3x3 sea
 const RF_FULLV     : u32 = 1024u;  // ours: revalidate canonical visibility when shading
 const RF_CLAMP     : u32 = 2048u;  // ours: reservoir contribution clamp
 const RF_LIGHTPOWER: u32 = 4096u;  // ours: power-sampled emissive light list
+const RF_MIXSIGMA  : u32 = 8192u;  // ours: mixed pairing sigma (wide tap via params5.x)
+const RF_ADAPTCAND : u32 = 16384u; // ours: adaptive RIS candidate budgets (params5.y)
+const RF_CONFDENOISE:u32 = 32768u; // ours: reservoir-confidence-driven denoise (params5.z)
+const RF_LIGHTGRID : u32 = 65536u; // ours: per-brick light grid, ReGIR-style (params6.x)
+const RF_MUTATE    : u32 = 131072u;// ours: intra-face MCMC mutation decorrelation (params5.w)
+const RF_HISTISOLATE:u32 = 262144u;// ours: keep pre-spatial temporal lineage as history
+const RF_WORLDGI   : u32 = 524288u;// ours: brick/face-keyed world-space GI reuse cache
 
 fn rflag(bit : u32) -> bool { return (u.params2.x & bit) != 0u; }
 

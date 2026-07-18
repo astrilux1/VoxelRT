@@ -19,6 +19,13 @@
 //
 // Output: demodulated radiance = pass-through direct + reservoir shading,
 // and the post-reuse reservoir that becomes next frame's temporal history.
+// With RF_CONFDENOISE the radiance alpha carries the estimator-quality
+// signal q (see qualitySignal below); otherwise it stays a constant 1.0.
+// RF_HISTISOLATE is an experimental correlation-control path: spatial reuse
+// still contributes to the current estimate, but the pre-spatial canonical
+// reservoir is retained as next-frame history. This prevents spatially copied
+// lineages from recursively feeding the temporal-plus-spatial chain without
+// adding a buffer, a ray, or a hot-loop branch.
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(3) var radianceOut : texture_storage_2d<rgba16float, write>;
@@ -26,8 +33,32 @@
 @group(0) @binding(7) var<storage, read> reservoirsA : array<Reservoir>;
 @group(0) @binding(8) var directTex : texture_2d<f32>;
 @group(0) @binding(9) var<storage, read_write> reservoirsB : array<Reservoir>;
+// Previous frame's sample-duplication map (written by dupmap.wgsl after this
+// pass; only consumed here when RF_CONFDENOISE is set).
+@group(0) @binding(12) var dupTex : texture_2d<f32>;
 // Concatenated pairing textures (2 x i16 coordinate deltas per texel).
 @group(0) @binding(13) var<storage, read> pairing : array<u32>;
+// World-space GI reuse cache (RF_WORLDGI): seeded here with the shaded
+// reservoir, queried next frame by pathtrace (docs/WORLDGI.md §4B).
+@group(0) @binding(15) var<storage, read_write> worldGi : array<Reservoir>;
+
+// RF_CONFDENOISE: per-pixel estimator-quality signal q in [0,1], carried in
+// the radiance alpha channel (which is otherwise a constant 1.0 that nothing
+// reads). q multiplies two proxies of actual estimator quality:
+//   - post-spatial reservoir confidence c, normalized by 2*cCap (the
+//     steady-state scale of a canonical + 3-tap merge whose inputs are each
+//     capped near cCap) — low after disocclusion or failed reuse;
+//   - one minus the duplication score D (previous frame's dupmap at this
+//     pixel) — high duplication means correlated samples masquerading as
+//     converged.
+// Downstream (denoised path only): temporal.wgsl shortens the history cap
+// and atrous.wgsl strengthens filtering as q falls. With the flag off the
+// alpha stays 1.0 exactly as before.
+fn qualitySignal(c : f32, pix : vec2<i32>) -> f32 {
+  let conf = clamp(c / max(2.0 * u.params3.x, 1.0), 0.0, 1.0);
+  let dupS = clamp(textureLoad(dupTex, pix, 0).x, 0.0, 1.0);
+  return conf * (1.0 - dupS);
+}
 
 // Pairing texture sizes are mutually near-coprime so tiling periods do not
 // align (cf. Lin 2026 footnote 3).
@@ -77,9 +108,9 @@ fn pairedPartner(pix : vec2<i32>, ti : u32) -> vec2<i32> {
   return pix + d;
 }
 
-fn surfaceAt(q : vec2<i32>, dims : vec2<f32>, t : f32) -> vec3<f32> {
+fn surfaceAt(q : vec2<i32>, dims : vec2<f32>, g : vec4<f32>) -> vec3<f32> {
   let uv = (vec2<f32>(q) + 0.5) / dims;
-  return u.camPos.xyz + cameraRay(uv) * t;
+  return receiverPoint(u.camPos.xyz, cameraRay(uv), g.w, g.xyz);
 }
 
 // Can `s` illuminate the receiver? One shadow ray.
@@ -113,22 +144,34 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   initRng(gid.xy, u.params0.x ^ 0x2c1b3c6du);
 
-  let x1 = surfaceAt(pix, fdims, g.w);
+  let x1 = surfaceAt(pix, fdims, g);
   let n1 = g.xyz;
   let tPrim = g.w;
   let cosView = max(dot(n1, normalize(u.camPos.xyz - x1)), 0.0);
 
-  // Gather candidates: canonical + up to 3 spatial neighbors.
+  // Reuse domains vs candidates: the canonical pixel plus every *validated*
+  // neighbor is a technique domain, even when its reservoir is null or its
+  // sample fails the footprint criterion. A null reservoir is a zero-valued
+  // outcome of that domain's sampling — its confidence must stay in the MIS
+  // denominators and in the pooled output confidence, or resampling
+  // converges to the conditional mean E[w | sample found] and inflates
+  // energy by 1/(1-q) (measured +165% in `gi`, +4% unified).
+  var domX1 : array<vec3<f32>, 4>;
+  var domN1 : array<vec3<f32>, 4>;
+  var domC  : array<f32, 4>;
+  var nDom = 0u;
   var cand : array<Sample, 4>;
-  var candX1 : array<vec3<f32>, 4>;
-  var candN1 : array<vec3<f32>, 4>;
+  var candDom : array<u32, 4>;
   var nCand = 0u;
 
   let canonical = unpackReservoir(reservoirsA[pixIdx]);
+  domX1[0] = x1;
+  domN1[0] = n1;
+  domC[0] = canonical.c;
+  nDom = 1u;
   if (canonical.kind != SK_NONE) {
     cand[0] = canonical;
-    candX1[0] = x1;
-    candN1[0] = n1;
+    candDom[0] = 0u;
     nCand = 1u;
   }
 
@@ -141,7 +184,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     for (var ti = 0u; ti < taps; ti++) {
       var q : vec2<i32>;
       if (paired) {
-        q = pairedPartner(pix, ti);
+        // With RF_MIXSIGMA the host builds pairing texture 0 with the wide σ
+        // (params5.x) and the rest with the base σ, so route the LAST tap to
+        // texture 0 and shift the others up — near taps keep gathering
+        // detail while one long-range tap collects low-frequency GI. σ only
+        // shapes which partner a pixel gets; it never enters the MIS/weight
+        // math, so mixing tap widths needs no weight changes.
+        var tex = ti;
+        if (rflag(RF_MIXSIGMA)) {
+          tex = select(ti + 1u, 0u, ti + 1u == taps);
+        }
+        q = pairedPartner(pix, tex);
       } else {
         // Classic random neighbor in a uniform disk (radius in params4.x).
         let r = u.params4.x * sqrt(rand());
@@ -152,7 +205,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
       let gq = textureLoad(gbufCur, q, 0);
       if (gq.w <= 0.0) { continue; }
-      let x1q = surfaceAt(q, fdims, gq.w);
+      let x1q = surfaceAt(q, fdims, gq);
 
       // Neighbor compatibility. The baseline test (normal + relative depth)
       // is what generic ReSTIR uses; the plane-exact test additionally
@@ -166,19 +219,44 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       if (!ok) { continue; }
 
       let rq = unpackReservoir(reservoirsA[u32(q.y) * dims.x + u32(q.x)]);
-      if (rq.kind == SK_NONE) { continue; }
-      if (rflag(RF_FOOTPRINT) && !footprintOK(rq, x1, n1, tPrim, cosView)) { continue; }
-
-      cand[nCand] = rq;
-      candX1[nCand] = x1q;
-      candN1[nCand] = gq.xyz;
-      nCand++;
+      // A null reservoir is a zero-valued outcome of an applicable domain and
+      // must stay in the MIS normalization. A non-null sample whose only
+      // reconnection fails the footprint criterion is different: Lin 2026's
+      // hybrid shift would continue replay to a later reconnection vertex.
+      // This voxel specialization has no replay fallback, so that neighbor
+      // technique is inapplicable for this draw. Counting it as a null domain
+      // dilutes every surviving estimator and creates systematic darkening.
+      let reconnectable = rq.kind == SK_NONE || !rflag(RF_FOOTPRINT) ||
+        footprintOK(rq, x1, n1, tPrim, cosView);
+      if (!reconnectable) { continue; }
+      domX1[nDom] = x1q;
+      domN1[nDom] = gq.xyz;
+      domC[nDom] = rq.c;
+      if (rq.kind != SK_NONE) {
+        cand[nCand] = rq;
+        candDom[nCand] = nDom;
+        nCand++;
+      }
+      nDom++;
     }
   }
 
+  var cTotal = 0.0;
+  for (var l = 0u; l < nDom; l++) { cTotal += domC[l]; }
+
   if (nCand == 0u) {
-    textureStore(radianceOut, pix, vec4<f32>(direct, 1.0));
-    reservoirsB[pixIdx] = emptyReservoir();
+    // Pooled null: keep the domains' confidence so downstream merges keep
+    // counting these zero outcomes. Zero quality when the signal is active.
+    textureStore(radianceOut, pix,
+      vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = min(cTotal, 255.0);
+    if (rflag(RF_HISTISOLATE)) {
+      reservoirsB[pixIdx] = reservoirsA[pixIdx];
+    } else {
+      reservoirsB[pixIdx] = packReservoir(nullOut);
+    }
     return;
   }
 
@@ -194,18 +272,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   sel.kind = SK_NONE;
   var selP = 0.0;
   var selJ = 0u;
-  var cTotal = 0.0;
 
   for (var j = 0u; j < nCand; j++) {
     let s = cand[j];
-    cTotal += s.c;
 
+    // Balance heuristic over ALL domains (null ones included): a domain
+    // that produced nothing this round still normalizes the partition.
     var denom = 0.0;
-    for (var l = 0u; l < nCand; l++) {
-      denom += cand[l].c * evalTarget(s, candX1[l], candN1[l]);
+    for (var l = 0u; l < nDom; l++) {
+      denom += domC[l] * evalTarget(s, domX1[l], domN1[l]);
     }
     if (denom <= 0.0) { continue; }
-    let m = cand[j].c * evalTarget(s, candX1[j], candN1[j]) / denom;
+    let dj = candDom[j];
+    let m = domC[dj] * evalTarget(s, domX1[dj], domN1[dj]) / denom;
 
     let pMe = evalTarget(s, x1, n1);
     let w = m * pMe * max(s.W, 0.0);
@@ -226,8 +305,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   if (sel.kind == SK_NONE || selP <= 0.0 || wSum <= 0.0) {
-    textureStore(radianceOut, pix, vec4<f32>(direct, 1.0));
-    reservoirsB[pixIdx] = emptyReservoir();
+    // Resampling failed: pooled null (see above) + zero quality signal.
+    textureStore(radianceOut, pix,
+      vec4<f32>(direct, select(1.0, 0.0, rflag(RF_CONFDENOISE))));
+    var nullOut : Sample;
+    nullOut.kind = SK_NONE;
+    nullOut.c = min(cTotal, 255.0);
+    if (rflag(RF_HISTISOLATE)) {
+      reservoirsB[pixIdx] = reservoirsA[pixIdx];
+    } else {
+      reservoirsB[pixIdx] = packReservoir(nullOut);
+    }
     return;
   }
 
@@ -245,6 +333,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (l > u.params4.z) { contrib *= u.params4.z / l; }
   }
 
-  textureStore(radianceOut, pix, vec4<f32>(direct + contrib, 1.0));
-  reservoirsB[pixIdx] = packReservoir(sel);
+  var qual = 1.0;
+  if (rflag(RF_CONFDENOISE)) { qual = qualitySignal(sel.c, pix); }
+  textureStore(radianceOut, pix, vec4<f32>(direct + contrib, qual));
+  let outRes = packReservoir(sel);
+  if (rflag(RF_HISTISOLATE)) {
+    reservoirsB[pixIdx] = reservoirsA[pixIdx];
+  } else {
+    reservoirsB[pixIdx] = outRes;
+  }
+
+  // Seed the world-space GI cache with this shaded reservoir (RF_WORLDGI,
+  // docs/WORLDGI.md §4B). Last-writer-wins across the pixels of a cell; only
+  // non-null samples are written so a pixel that failed this frame cannot
+  // erase a good cached sample — that persistence through disocclusion is the
+  // cache's whole purpose. The two null early-returns above do not seed.
+  if (rflag(RF_WORLDGI) && sel.kind != SK_NONE) {
+    worldGi[worldCellIndex(x1, n1)] = outRes;
+  }
 }

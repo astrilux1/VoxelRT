@@ -1,0 +1,674 @@
+{
+  "claimManifest": {
+    "id": "voxelrt-lin2026-claim-v1",
+    "schemaVersion": 1,
+    "sha256": "e734c1030fd10dbe0ebca705c2bf9f8a601a80906b73cc92d8faa466360ea736"
+  },
+  "correctnessManifest": {
+    "id": "voxelrt-estimator-correctness-v1",
+    "schemaVersion": 1,
+    "sha256": "892f09607a56ef06e582a33763165730f6eff193ba9d3063e50667b66aafae00"
+  },
+  "claimable": true,
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "reference": {
+    "frames": 1600,
+    "bounces": 12
+  },
+  "thresholds": {
+    "maxChannelMeanRelativeDelta": 0.01,
+    "minHdrPsnrPeakDb": 30
+  },
+  "pass": true,
+  "rows": [
+    {
+      "scenario": "interior_static",
+      "config": "base",
+      "query": "preset=base&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.03692373260855675,
+        "hdrRmse": 0.19215549070624224,
+        "hdrRelativeRmse": 0.05839309466073857,
+        "hdrPsnrPeak": 48.909454459500836,
+        "meanAbsRelative": 0.7527006268501282,
+        "referenceMeanRgb": [
+          1.5138602256774902,
+          1.01949942111969,
+          0.7138803005218506
+        ],
+        "testMeanRgb": [
+          1.507604956626892,
+          1.016838550567627,
+          0.7124074697494507
+        ],
+        "channelMeanRelativeDelta": [
+          0.0041319988667964935,
+          0.002609977498650551,
+          0.0020631339866667986
+        ],
+        "maxChannelMeanRelativeDelta": 0.0041319988667964935,
+        "flip": 0.07864195853471756
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.0041319988667964935,
+        "hdrPsnrPeakDb": 48.909454459500836,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "interior_static",
+      "config": "gi",
+      "query": "preset=gi&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.02965553104877472,
+        "hdrRmse": 0.17220781355320297,
+        "hdrRelativeRmse": 0.052331302744316195,
+        "hdrPsnrPeak": 48.81281513794307,
+        "meanAbsRelative": 0.6432579755783081,
+        "referenceMeanRgb": [
+          1.5138602256774902,
+          1.01949942111969,
+          0.7138803005218506
+        ],
+        "testMeanRgb": [
+          1.5044916868209839,
+          1.0157684087753296,
+          0.7111080884933472
+        ],
+        "channelMeanRelativeDelta": [
+          0.006188509985804558,
+          0.0036596511490643024,
+          0.0038833008147776127
+        ],
+        "maxChannelMeanRelativeDelta": 0.006188509985804558,
+        "flip": 0.0789531022310257
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.006188509985804558,
+        "hdrPsnrPeakDb": 48.81281513794307,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "interior_static",
+      "config": "unified",
+      "query": "preset=gi&unified=1&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.043925926089286804,
+        "hdrRmse": 0.20958512850220742,
+        "hdrRelativeRmse": 0.06368969319134261,
+        "hdrPsnrPeak": 56.14190772102326,
+        "meanAbsRelative": 0.6699253916740417,
+        "referenceMeanRgb": [
+          1.5138602256774902,
+          1.01949942111969,
+          0.7138803005218506
+        ],
+        "testMeanRgb": [
+          1.5038723945617676,
+          1.0150575637817383,
+          0.7103840708732605
+        ],
+        "channelMeanRelativeDelta": [
+          0.0065975915640592575,
+          0.004356900230050087,
+          0.004897501319646835
+        ],
+        "maxChannelMeanRelativeDelta": 0.0065975915640592575,
+        "flip": 0.09682010859251022
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.0065975915640592575,
+        "hdrPsnrPeakDb": 56.14190772102326,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "interior_static",
+      "config": "lin_unbiased",
+      "query": "preset=lin&treuse=0&dupmap=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.04015392065048218,
+        "hdrRmse": 0.20038443215599902,
+        "hdrRelativeRmse": 0.06089374325145674,
+        "hdrPsnrPeak": 53.776155936993646,
+        "meanAbsRelative": 0.6564912796020508,
+        "referenceMeanRgb": [
+          1.5138602256774902,
+          1.01949942111969,
+          0.7138803005218506
+        ],
+        "testMeanRgb": [
+          1.5037071704864502,
+          1.015047550201416,
+          0.7103006839752197
+        ],
+        "channelMeanRelativeDelta": [
+          0.006706732325255871,
+          0.004366722423583269,
+          0.0050143091939389706
+        ],
+        "maxChannelMeanRelativeDelta": 0.006706732325255871,
+        "flip": 0.09662968665361404
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.006706732325255871,
+        "hdrPsnrPeakDb": 53.776155936993646,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "interior_static",
+      "config": "ours_unbiased",
+      "query": "preset=ours&treuse=0&dupmap=0&rclamp=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.04116502031683922,
+        "hdrRmse": 0.2028916467399267,
+        "hdrRelativeRmse": 0.06165564715540445,
+        "hdrPsnrPeak": 53.44313183199471,
+        "meanAbsRelative": 0.6157683730125427,
+        "referenceMeanRgb": [
+          1.5138602256774902,
+          1.01949942111969,
+          0.7138803005218506
+        ],
+        "testMeanRgb": [
+          1.5035429000854492,
+          1.0148708820343018,
+          0.7102511525154114
+        ],
+        "channelMeanRelativeDelta": [
+          0.006815243046730757,
+          0.004540011286735535,
+          0.005083692725747824
+        ],
+        "maxChannelMeanRelativeDelta": 0.006815243046730757,
+        "flip": 0.09623372554779053
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.006815243046730757,
+        "hdrPsnrPeakDb": 53.44313183199471,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "exterior_static",
+      "config": "base",
+      "query": "preset=base&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.04401303827762604,
+        "hdrRmse": 0.2097928461068824,
+        "hdrRelativeRmse": 0.06527572900184116,
+        "hdrPsnrPeak": 48.35662216836623,
+        "meanAbsRelative": 0.5364815592765808,
+        "referenceMeanRgb": [
+          1.0344111919403076,
+          1.015512466430664,
+          0.8185272812843323
+        ],
+        "testMeanRgb": [
+          1.0316308736801147,
+          1.0140222311019897,
+          0.8180102705955505
+        ],
+        "channelMeanRelativeDelta": [
+          0.0026878269854933023,
+          0.001467471243813634,
+          0.0006316352519206703
+        ],
+        "maxChannelMeanRelativeDelta": 0.0026878269854933023,
+        "flip": 0.06569989770650864
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.0026878269854933023,
+        "hdrPsnrPeakDb": 48.35662216836623,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "exterior_static",
+      "config": "gi",
+      "query": "preset=gi&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.03951875492930412,
+        "hdrRmse": 0.19879324668937856,
+        "hdrRelativeRmse": 0.06185327259291294,
+        "hdrPsnrPeak": 47.72720031081402,
+        "meanAbsRelative": 0.47782930731773376,
+        "referenceMeanRgb": [
+          1.0344111919403076,
+          1.015512466430664,
+          0.8185272812843323
+        ],
+        "testMeanRgb": [
+          1.0288304090499878,
+          1.011088490486145,
+          0.8162844181060791
+        ],
+        "channelMeanRelativeDelta": [
+          0.005395130254328251,
+          0.004356397315859795,
+          0.002740120282396674
+        ],
+        "maxChannelMeanRelativeDelta": 0.005395130254328251,
+        "flip": 0.07294386625289917
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.005395130254328251,
+        "hdrPsnrPeakDb": 47.72720031081402,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "exterior_static",
+      "config": "unified",
+      "query": "preset=gi&unified=1&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.11152727901935577,
+        "hdrRmse": 0.3339570017522552,
+        "hdrRelativeRmse": 0.10390862772099291,
+        "hdrPsnrPeak": 63.44019932888338,
+        "meanAbsRelative": 0.4649331271648407,
+        "referenceMeanRgb": [
+          1.0344111919403076,
+          1.015512466430664,
+          0.8185272812843323
+        ],
+        "testMeanRgb": [
+          1.0263166427612305,
+          1.0092787742614746,
+          0.8155222535133362
+        ],
+        "channelMeanRelativeDelta": [
+          0.007825272157788277,
+          0.006138469558209181,
+          0.0036712614819407463
+        ],
+        "maxChannelMeanRelativeDelta": 0.007825272157788277,
+        "flip": 0.08686846494674683
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.007825272157788277,
+        "hdrPsnrPeakDb": 63.44019932888338,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "exterior_static",
+      "config": "lin_unbiased",
+      "query": "preset=lin&treuse=0&dupmap=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.053207553923130035,
+        "hdrRmse": 0.23066762651731176,
+        "hdrRelativeRmse": 0.07177078607518828,
+        "hdrPsnrPeak": 51.87262500357497,
+        "meanAbsRelative": 0.4735056459903717,
+        "referenceMeanRgb": [
+          1.0344111919403076,
+          1.015512466430664,
+          0.8185272812843323
+        ],
+        "testMeanRgb": [
+          1.02606201171875,
+          1.0091440677642822,
+          0.8153626322746277
+        ],
+        "channelMeanRelativeDelta": [
+          0.008071432821452618,
+          0.006271118298172951,
+          0.0038662718143314123
+        ],
+        "maxChannelMeanRelativeDelta": 0.008071432821452618,
+        "flip": 0.08608990907669067
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.008071432821452618,
+        "hdrPsnrPeakDb": 51.87262500357497,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "exterior_static",
+      "config": "ours_unbiased",
+      "query": "preset=ours&treuse=0&dupmap=0&rclamp=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.05266774445772171,
+        "hdrRmse": 0.22949454123730637,
+        "hdrRelativeRmse": 0.07140578794367587,
+        "hdrPsnrPeak": 51.568800939394876,
+        "meanAbsRelative": 0.4503782391548157,
+        "referenceMeanRgb": [
+          1.0344111919403076,
+          1.015512466430664,
+          0.8185272812843323
+        ],
+        "testMeanRgb": [
+          1.0259193181991577,
+          1.0086420774459839,
+          0.8152644634246826
+        ],
+        "channelMeanRelativeDelta": [
+          0.008209379389882088,
+          0.006765440106391907,
+          0.003986205440014601
+        ],
+        "maxChannelMeanRelativeDelta": 0.008209379389882088,
+        "flip": 0.08652090281248093
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.008209379389882088,
+        "hdrPsnrPeakDb": 51.568800939394876,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "lamps_static",
+      "config": "base",
+      "query": "preset=base&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.038208603858947754,
+        "hdrRmse": 0.19547021220366995,
+        "hdrRelativeRmse": 0.1553802523113072,
+        "hdrPsnrPeak": 50.095988658150404,
+        "meanAbsRelative": 0.747031569480896,
+        "referenceMeanRgb": [
+          0.3029361069202423,
+          0.34698161482810974,
+          0.3868049681186676
+        ],
+        "testMeanRgb": [
+          0.30293941497802734,
+          0.3471345007419586,
+          0.3877655267715454
+        ],
+        "channelMeanRelativeDelta": [
+          0.00001091998547053663,
+          0.00044061674270778894,
+          0.0024833153001964092
+        ],
+        "maxChannelMeanRelativeDelta": 0.0024833153001964092,
+        "flip": 0.10530496388673782
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.0024833153001964092,
+        "hdrPsnrPeakDb": 50.095988658150404,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "lamps_static",
+      "config": "gi",
+      "query": "preset=gi&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.03751659765839577,
+        "hdrRmse": 0.1936920175391742,
+        "hdrRelativeRmse": 0.15396675645169214,
+        "hdrPsnrPeak": 50.175365889146015,
+        "meanAbsRelative": 0.6923614144325256,
+        "referenceMeanRgb": [
+          0.3029361069202423,
+          0.34698161482810974,
+          0.3868049681186676
+        ],
+        "testMeanRgb": [
+          0.3009989559650421,
+          0.34504789113998413,
+          0.38503193855285645
+        ],
+        "channelMeanRelativeDelta": [
+          0.006394586060196161,
+          0.005572985857725143,
+          0.004583781585097313
+        ],
+        "maxChannelMeanRelativeDelta": 0.006394586060196161,
+        "flip": 0.10080060362815857
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.006394586060196161,
+        "hdrPsnrPeakDb": 50.175365889146015,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "lamps_static",
+      "config": "unified",
+      "query": "preset=gi&unified=1&treuse=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.05732766166329384,
+        "hdrRmse": 0.23943195622826507,
+        "hdrRelativeRmse": 0.19032566318275684,
+        "hdrPsnrPeak": 52.38351022194881,
+        "meanAbsRelative": 0.6944338083267212,
+        "referenceMeanRgb": [
+          0.3029361069202423,
+          0.34698161482810974,
+          0.3868049681186676
+        ],
+        "testMeanRgb": [
+          0.3003993034362793,
+          0.3442665636539459,
+          0.38488537073135376
+        ],
+        "channelMeanRelativeDelta": [
+          0.008374054916203022,
+          0.007824769243597984,
+          0.0049627008847892284
+        ],
+        "maxChannelMeanRelativeDelta": 0.008374054916203022,
+        "flip": 0.13798664510250092
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.008374054916203022,
+        "hdrPsnrPeakDb": 52.38351022194881,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "lamps_static",
+      "config": "lin_unbiased",
+      "query": "preset=lin&treuse=0&dupmap=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.05564907193183899,
+        "hdrRmse": 0.23590055517492745,
+        "hdrRelativeRmse": 0.18751853476920455,
+        "hdrPsnrPeak": 52.51194061943118,
+        "meanAbsRelative": 0.6740381717681885,
+        "referenceMeanRgb": [
+          0.3029361069202423,
+          0.34698161482810974,
+          0.3868049681186676
+        ],
+        "testMeanRgb": [
+          0.3005400598049164,
+          0.34431323409080505,
+          0.38481298089027405
+        ],
+        "channelMeanRelativeDelta": [
+          0.007909414358437061,
+          0.00769026530906558,
+          0.005149849224835634
+        ],
+        "maxChannelMeanRelativeDelta": 0.007909414358437061,
+        "flip": 0.13780879974365234
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.007909414358437061,
+        "hdrPsnrPeakDb": 52.51194061943118,
+        "reasons": []
+      }
+    },
+    {
+      "scenario": "lamps_static",
+      "config": "ours_unbiased",
+      "query": "preset=ours&treuse=0&dupmap=0&rclamp=0&footprint=0&maxhist=1000000&fclamp=0",
+      "frames": 800,
+      "bounces": 8,
+      "seed": 0,
+      "metrics": {
+        "hdrMse": 0.053428370505571365,
+        "hdrRmse": 0.23114577760705768,
+        "hdrRelativeRmse": 0.1837389382268426,
+        "hdrPsnrPeak": 54.70428380612525,
+        "meanAbsRelative": 0.6692651510238647,
+        "referenceMeanRgb": [
+          0.3029361069202423,
+          0.34698161482810974,
+          0.3868049681186676
+        ],
+        "testMeanRgb": [
+          0.3001781404018402,
+          0.34415963292121887,
+          0.38450390100479126
+        ],
+        "channelMeanRelativeDelta": [
+          0.00910411961376667,
+          0.008132943883538246,
+          0.005948907695710659
+        ],
+        "maxChannelMeanRelativeDelta": 0.00910411961376667,
+        "flip": 0.13276509940624237
+      },
+      "assessment": {
+        "pass": true,
+        "maxChannelMeanRelativeDelta": 0.00910411961376667,
+        "hdrPsnrPeakDb": 54.70428380612525,
+        "reasons": []
+      }
+    }
+  ],
+  "runtime": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "browserVersion": "149.0.7827.55",
+    "playwrightVersion": "1.61.1",
+    "metrics": {
+      "python": "3.12.13",
+      "numpy": "2.3.5",
+      "flipEvaluator": "1.7"
+    },
+    "gpu": {
+      "adapterInfo": {
+        "vendor": "nvidia",
+        "architecture": "ampere",
+        "device": "",
+        "description": "",
+        "accumulationFormat": "rgba32float",
+        "features": [
+          "depth32float-stencil8",
+          "rg11b10ufloat-renderable",
+          "texture-formats-tier1",
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "texture-compression-bc",
+          "dual-source-blending",
+          "core-features-and-limits",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "float32-filterable",
+          "indirect-first-instance",
+          "float32-blendable",
+          "depth-clip-control",
+          "texture-compression-bc-sliced-3d",
+          "shader-f16",
+          "clip-distances",
+          "texture-formats-tier2",
+          "timestamp-query",
+          "primitive-index",
+          "texture-component-swizzle",
+          "subgroups"
+        ],
+        "limits": {
+          "maxTextureDimension2D": 16384,
+          "maxStorageBufferBindingSize": 2147483644,
+          "maxStorageBuffersPerShaderStage": 16,
+          "maxComputeInvocationsPerWorkgroup": 1024,
+          "maxComputeWorkgroupSizeX": 1024,
+          "maxComputeWorkgroupSizeY": 1024,
+          "maxComputeWorkgroupSizeZ": 64,
+          "maxComputeWorkgroupsPerDimension": 65535
+        }
+      },
+      "text": "nvidia / ampere",
+      "nvidiaGpus": [
+        "NVIDIA GeForce RTX 3080"
+      ],
+      "launchArgs": [
+        "--no-sandbox",
+        "--enable-unsafe-webgpu",
+        "--force_high_performance_gpu",
+        "--ignore-gpu-blocklist",
+        "--disable-software-rasterizer",
+        "--disable-gpu-vsync",
+        "--disable-frame-rate-limit",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows"
+      ],
+      "executablePath": "C:\\Users\\saege\\AppData\\Local\\ms-playwright\\chromium-1228\\chrome-win64\\chrome.exe",
+      "timestampQuery": {
+        "requested": true,
+        "supported": true,
+        "warmupFrames": 4
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@ import { makePairingBuffer } from './pairing.js';
 
 const params = new URLSearchParams(location.search);
 const GRID = parseInt(params.get('grid') || '256', 10);
+const SCENE_VARIANT = params.get('scene') || 'default';
 let renderScale = parseFloat(params.get('scale') || '1');
 let bounces = parseInt(params.get('bounces') || '2', 10);
 let exposure = 1.0;
@@ -33,20 +34,31 @@ let sunElevation = 0.85;
 const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
-  lightpower: 4096,
+  lightpower: 4096, mixsigma: 8192, adaptcand: 16384, confdenoise: 32768,
+  lightgrid: 65536, mutate: 131072, histisolate: 262144, worldgi: 524288,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
   base: [],
   // ReSTIR GI-style: reservoirs for indirect only, random-disk spatial reuse.
   gi: ['restir', 'treuse', 'sreuse'],
-  // Faithful adaptation of the Lin 2026 technique set.
-  lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+  // Applicable Lin 2026 technique set. The Section 4 footprint criterion is
+  // not default-on: it selects a later hybrid-shift replay vertex, but this
+  // Lambertian x2-only specialization has no replay fallback. Its flag stays
+  // available as a negative ablation until such a fallback exists.
+  lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
         'vector', 'unified'],
   // Ours: Lin 2026 + voxel-exact plane reuse, disocclusion rescue,
   // per-candidate visibility, reservoir contribution clamp, light power sampling.
-  ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+  ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
          'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp', 'lightpower'],
+  // Motion-specialized ours: spatial reuse still shades the current frame,
+  // but only the pre-spatial temporal lineage becomes next-frame history.
+  // This avoids recursive spatial sample propagation under camera motion;
+  // keep it explicit because short static sequences prefer the base preset.
+  ours_motion: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
+                'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp',
+                'lightpower', 'histisolate'],
 };
 const preset = params.get('preset') || 'ours';
 let restirFlags = (PRESETS[preset] || PRESETS.ours)
@@ -67,6 +79,13 @@ const tuning = {
   clamp: parseFloat(params.get('rclampv') || '24'),
   maxhist: parseFloat(params.get('maxhist') || '64'),
   fseed: parseInt(params.get('fseed') || '0', 10),
+  // Slots pre-allocated for flag-gated experiments (params5/params6).
+  sigma2: parseFloat(params.get('sigma2') || '48'),      // mixsigma: wide tap σ (px)
+  candscale: parseFloat(params.get('candscale') || '1'), // adaptcand: budget scale
+  confk: parseFloat(params.get('confk') || '1'),         // confdenoise: strength
+  mutscale: parseFloat(params.get('mutscale') || '0.5'), // mutate: proposal scale
+  gridcand: parseFloat(params.get('gridcand') || '8'),   // lightgrid: cell candidates
+  wgicap: parseFloat(params.get('wgicap') || '0'),       // worldgi: cache confidence cap
 };
 // Deterministic camera strafe for benchmarking temporal behavior, and an
 // exact frame count to halt at so captures land on a reproducible pose.
@@ -122,9 +141,18 @@ async function init() {
   if (!adapter) throw new Error('No WebGPU adapter found.');
   const wantTiming = params.get('timing') === '1';
   const timingSupported = wantTiming && adapter.features?.has?.('timestamp-query');
-  const device = await adapter.requestDevice({
-    requiredFeatures: timingSupported ? ['timestamp-query'] : [],
-  });
+  // fp32 accumulation: fp16 running means quantize past ~1000 frames (history
+  // rides in alpha and integers >2048 aren't even representable), which drifts
+  // long converged references. Filterable fp32 is required because temporal
+  // reprojection samples the history bilinearly.
+  const accumF32 = adapter.features?.has?.('float32-filterable');
+  const accumFormat = accumF32 ? 'rgba32float' : 'rgba16float';
+  if (!accumF32) console.warn('float32-filterable unavailable: fp16 accumulation, long references will drift');
+  const requiredFeatures = [
+    ...(timingSupported ? ['timestamp-query'] : []),
+    ...(accumF32 ? ['float32-filterable'] : []),
+  ];
+  const device = await adapter.requestDevice({ requiredFeatures });
   device.addEventListener('uncapturederror', (e) => fatal(e.error.message));
   device.lost.then((info) => {
     if (info.reason !== 'destroyed') fatal(`WebGPU device lost: ${info.message}`);
@@ -133,6 +161,7 @@ async function init() {
     vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
     device: adapter.info?.device, description: adapter.info?.description,
     isFallbackAdapter: adapter.isFallbackAdapter,
+    accumulationFormat: accumFormat,
     features: Array.from(adapter.features || []),
     limits: adapterLimits(adapter.limits),
   };
@@ -156,7 +185,7 @@ async function init() {
   }
 
   // --- Scene ---------------------------------------------------------------
-  const scene = generateScene(GRID);
+  const scene = generateScene(GRID, SCENE_VARIANT);
   const voxelBuf = device.createBuffer({
     label: 'voxels', size: scene.vox.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -174,8 +203,24 @@ async function init() {
   device.queue.writeBuffer(brickMaskBuf, 0, scene.brickMasks);
 
   const uniformBuf = device.createBuffer({
-    label: 'uniforms', size: 272,
+    label: 'uniforms', size: 304,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // World-space GI reuse cache (RF_WORLDGI, docs/WORLDGI.md): one persistent
+  // 32-byte reservoir per (brick, face) cell, resolution-independent, created
+  // once. WebGPU zero-inits it, and a zero reservoir decodes as SK_NONE/c=0 —
+  // an empty (inert) cache. Not ping-ponged: persistence across frames is the
+  // point. (256/8)³ × 6 faces × 32 B ≈ 6.29 MB.
+  // Full cache is 6 faces × 8 sub-brick voxel layers × brick grid (~50 MB).
+  // worldgi is a killed-with-evidence experiment (docs/WORLDGI.md §7.4), so only
+  // pay for it when the flag is actually set; otherwise bind a stub (the shader
+  // never indexes it with the flag off).
+  const bgrid = GRID / BRICK;
+  const worldGiBuf = device.createBuffer({
+    label: 'worldGi',
+    size: (restirFlags & RF.worldgi) ? bgrid * bgrid * bgrid * 6 * 8 * 32 : 32,
+    usage: GPUBufferUsage.STORAGE,
   });
 
   // Emissive-face light list (unified DI+GI candidates).
@@ -189,9 +234,28 @@ async function init() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(lightAliasBuf, 0, scene.lightAlias);
+  // Per-brick-cell top-K light table (RF_LIGHTGRID), built once on the CPU.
+  const lightGridBuf = device.createBuffer({
+    label: 'lightGrid', size: scene.lightGrid.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(lightGridBuf, 0, scene.lightGrid);
+  status.lightGrid = {
+    buildMs: scene.lightGridMs,
+    bytes: scene.lightGrid.byteLength,
+    lights: scene.lightCount,
+  };
+  console.log(`light grid: ${scene.lightCount} lights, ` +
+    `${(scene.lightGrid.byteLength / (1024 * 1024)).toFixed(2)} MB, ` +
+    `built in ${scene.lightGridMs.toFixed(1)} ms`);
 
   // Self-inverting Gaussian pairing textures for paired spatial reuse.
-  const pairingData = makePairingBuffer(Math.max(0.8, tuning.sigma));
+  // With RF_MIXSIGMA the wide-σ tap lives in texture 0 — the largest (254²),
+  // so the least Gaussian tail wraps by tiling — and reuse_spatial.wgsl
+  // routes the LAST tap there; the other taps keep the base σ.
+  const sigmaBase = Math.max(0.8, tuning.sigma);
+  const sigmaWide = (restirFlags & RF.mixsigma) ? Math.max(0.8, tuning.sigma2) : sigmaBase;
+  const pairingData = makePairingBuffer([sigmaWide, sigmaBase, sigmaBase]);
   const pairingBuf = device.createBuffer({
     label: 'pairing', size: pairingData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -213,11 +277,14 @@ async function init() {
   const voxelLib = await loadShader('voxel.wgsl');
   const [ptModule, trModule, spModule, dupModule, tModule, aModule, prModule] =
     await Promise.all([
-      makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))),
-      makeModule(device, 'reuse_temporal', common + restirLib + (await loadShader('reuse_temporal.wgsl'))),
+      makeModule(device, 'pathtrace', common + restirLib + voxelLib + (await loadShader('pathtrace.wgsl'))
+        .replace('FCLAMP_VALUE', parseFloat(params.get('fclamp') || '48').toFixed(1))),
+      // voxelLib: RF_MUTATE traces DDA visibility rays during temporal reuse.
+      makeModule(device, 'reuse_temporal', common + restirLib + voxelLib + (await loadShader('reuse_temporal.wgsl'))),
       makeModule(device, 'reuse_spatial', common + restirLib + voxelLib + (await loadShader('reuse_spatial.wgsl'))),
       makeModule(device, 'dupmap', common + restirLib + (await loadShader('dupmap.wgsl'))),
-      makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))),
+      makeModule(device, 'temporal', common + (await loadShader('temporal.wgsl'))
+        .replace('texture_storage_2d<rgba16float, write>', `texture_storage_2d<${accumFormat}, write>`)),
       makeModule(device, 'atrous', common + (await loadShader('atrous.wgsl'))),
       makeModule(device, 'present', await loadShader('present.wgsl')),
     ]);
@@ -277,7 +344,7 @@ async function init() {
       dup: makeTex('dup', 'r32float'),
       albedo: makeTex('albedo', 'rgba8unorm'),
       gbuf: [makeTex('gbufA', 'rgba32float'), makeTex('gbufB', 'rgba32float')],
-      accum: [makeTex('accumA', 'rgba16float'), makeTex('accumB', 'rgba16float')],
+      accum: [makeTex('accumA', accumFormat), makeTex('accumB', accumFormat)],
       denoise: [makeTex('denoiseA', 'rgba16float'), makeTex('denoiseB', 'rgba16float')],
     };
     // Reservoirs: 32 bytes per pixel; A = working set (initial + temporal),
@@ -302,7 +369,16 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
-  const uniformData = new ArrayBuffer(272);
+  // Bench hook: set the camera pose mid-run (used by the world-GI camera-return
+  // test to warm the cache, look away, and return). update() only moves on
+  // keypresses, so a pose set here persists.
+  status.setPose = (p) => {
+    camera.pos = [p.px, p.py, p.pz];
+    camera.yaw = p.yaw;
+    camera.pitch = p.pitch;
+    camera.moved = true;
+  };
+  const uniformData = new ArrayBuffer(304);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
   let prevViewProj = null;
@@ -334,11 +410,16 @@ async function init() {
     f32.set([...prevCamPos, 0], 36);
     f32.set([...sunDir, Math.cos(0.03)], 40);          // ~1.7° angular radius
     f32.set([5.0, 4.5, 3.8, 1.0], 44);                 // sun irradiance, sky intensity
-    u32.set([frame + tuning.fseed, bounces, temporalOn ? 1 : 0, 0], 48);
+    // params0.z: bit 0 = temporal accumulation, bit 1 = denoise active (lets
+    // presented-path-only features, e.g. confdenoise, no-op when denoise=0).
+    u32.set([frame + tuning.fseed, bounces,
+      (temporalOn ? 1 : 0) | (denoiseOn ? 2 : 0), 0], 48);
     f32.set([rw, rh, exposure, 0], 52);
     u32.set([restirFlags, scene.lightCount, tuning.taps, 0], 56);
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
     f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
+    f32.set([tuning.sigma2, tuning.candscale, tuning.confk, tuning.mutscale], 68);
+    f32.set([tuning.gridcand, tuning.wgicap, 0, 0], 72);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];
@@ -363,17 +444,22 @@ async function init() {
         { binding: 8, resource: tex.direct },
         { binding: 9, resource: { buffer: lightAliasBuf } },
         { binding: 10, resource: { buffer: brickMaskBuf } },
+        { binding: 11, resource: { buffer: lightGridBuf } },
       ],
     });
     const tr = device.createBindGroup({
       layout: trPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: uniformBuf } },
+        { binding: 1, resource: { buffer: voxelBuf } },
+        { binding: 2, resource: { buffer: brickBuf } },
         { binding: 4, resource: gCur },
         { binding: 6, resource: gPrev },
         { binding: 7, resource: { buffer: reservoirBufA } },
         { binding: 9, resource: { buffer: reservoirBufB } },
+        { binding: 10, resource: { buffer: brickMaskBuf } },
         { binding: 12, resource: tex.dup },
+        { binding: 15, resource: { buffer: worldGiBuf } },
       ],
     });
     const sp = device.createBindGroup({
@@ -388,7 +474,9 @@ async function init() {
         { binding: 8, resource: tex.direct },
         { binding: 9, resource: { buffer: reservoirBufB } },
         { binding: 10, resource: { buffer: brickMaskBuf } },
+        { binding: 12, resource: tex.dup },   // prev-frame dup score (confdenoise q)
         { binding: 13, resource: { buffer: pairingBuf } },
+        { binding: 15, resource: { buffer: worldGiBuf } },
       ],
     });
     const dup = device.createBindGroup({
@@ -425,6 +513,7 @@ async function init() {
         { binding: 4, resource: gCur },
         { binding: 5, resource: dst },
         { binding: 6, resource: { buffer: pbuf } },
+        { binding: 7, resource: tex.radiance },   // q in alpha (confdenoise)
       ],
     }));
     const finalTex = denoiseOn ? tex.denoise[0] : aCur;
@@ -538,18 +627,25 @@ async function init() {
     };
     if (opts.hdr) {
       const finalView = denoiseOn ? tex.denoise[0] : tex.accum[lastParity];
+      // Accumulation may be fp32 (see accumFormat); the denoise chain stays fp16.
+      const f32Illum = !denoiseOn && accumF32;
+      const illumStride = f32Illum ? 16 : 8;
       const [{ bytes: illum, bpr: illumBpr }, { bytes: alb, bpr: albBpr }] = await Promise.all([
-        readTextureBytes(finalView, 8),
+        readTextureBytes(finalView, illumStride),
         readTextureBytes(tex.albedo, 4),
       ]);
+      const illumDv = new DataView(illum.buffer, illum.byteOffset, illum.byteLength);
       const hdr = new Float32Array(rw * rh * 3);
       for (let y = 0, j = 0; y < rh; y++) {
         for (let x = 0; x < rw; x++) {
-          const hi = y * illumBpr + x * 8;
+          const hi = y * illumBpr + x * illumStride;
           const ai = y * albBpr + x * 4;
-          const ir = halfToFloat(illum[hi] | (illum[hi + 1] << 8));
-          const ig = halfToFloat(illum[hi + 2] | (illum[hi + 3] << 8));
-          const ib = halfToFloat(illum[hi + 4] | (illum[hi + 5] << 8));
+          const ir = f32Illum ? illumDv.getFloat32(hi, true)
+            : halfToFloat(illum[hi] | (illum[hi + 1] << 8));
+          const ig = f32Illum ? illumDv.getFloat32(hi + 4, true)
+            : halfToFloat(illum[hi + 2] | (illum[hi + 3] << 8));
+          const ib = f32Illum ? illumDv.getFloat32(hi + 8, true)
+            : halfToFloat(illum[hi + 4] | (illum[hi + 5] << 8));
           const ar = alb[ai] / 255;
           const ag = alb[ai + 1] / 255;
           const ab = alb[ai + 2] / 255;
@@ -641,7 +737,8 @@ async function init() {
       if (restirFlags & RF.restir) {
         if (restirFlags & RF.treuse) compute('reuse_temporal', trPipeline, bg.tr);
         compute('reuse_spatial', spPipeline, bg.sp);
-        if (restirFlags & RF.dupmap) compute('dupmap', dupPipeline, bg.dup);
+        // dupmap also feeds the RF_MUTATE trigger, so it runs for either flag.
+        if (restirFlags & (RF.dupmap | RF.mutate)) compute('dupmap', dupPipeline, bg.dup);
       }
       compute('temporal', tPipeline, bg.tp);
 

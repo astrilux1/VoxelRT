@@ -8,6 +8,9 @@
 @group(0) @binding(3) var srcTex  : texture_2d<f32>;
 @group(0) @binding(4) var gbufCur : texture_2d<f32>;
 @group(0) @binding(5) var dstTex  : texture_storage_2d<rgba16float, write>;
+// Per-pixel estimator-quality signal q in the alpha channel (written by
+// reuse_spatial.wgsl); only read when RF_CONFDENOISE is set.
+@group(0) @binding(7) var radianceTex : texture_2d<f32>;
 
 struct AtrousParams {
   stepSize : vec4<i32>,   // x = step in pixels
@@ -37,7 +40,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let history = max(center.a, 1.0);
   let lumC = luminance(center.rgb);
   // Less smoothing once the temporal accumulation has converged.
-  let sigmaL = max(0.08, 2.0 / sqrt(history));
+  var relax = 2.0 / sqrt(history);
+  if (rflag(RF_CONFDENOISE)) {
+    // Reservoir-quality-driven strength on top of the history relaxation:
+    // sigmaL scales by 1 + confk*(1-q) (confk = params5.z, ?confk= knob).
+    // q = 1 (confident, decorrelated reservoir) leaves the filter at its
+    // baseline; q = 0 (disocclusion / correlation blob) widens the
+    // luminance kernel by (1 + confk). History is already shortened for
+    // low q by temporal.wgsl, so the two effects compound where the
+    // estimator is genuinely poor and vanish where it is effectively
+    // many-sample.
+    let q = clamp(textureLoad(radianceTex, pix, 0).a, 0.0, 1.0);
+    relax *= 1.0 + u.params5.z * (1.0 - q);
+  }
+  let sigmaL = max(0.08, relax);
 
   var sum = center.rgb * KERNEL[0] * KERNEL[0];
   var wSum = KERNEL[0] * KERNEL[0];

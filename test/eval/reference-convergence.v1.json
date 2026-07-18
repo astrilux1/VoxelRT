@@ -1,0 +1,394 @@
+{
+  "claimManifest": {
+    "id": "voxelrt-lin2026-claim-v1",
+    "schemaVersion": 1,
+    "sha256": "e734c1030fd10dbe0ebca705c2bf9f8a601a80906b73cc92d8faa466360ea736"
+  },
+  "claimable": true,
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "thresholds": {
+    "maxChannelMeanRelativeDelta": 0.005,
+    "minHdrPsnrPeakDb": 30
+  },
+  "checkpoints": [
+    800,
+    1600,
+    3200
+  ],
+  "pass": true,
+  "rows": [
+    {
+      "scenario": "interior_static",
+      "evaluationFrame": 1,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.03701629117131233,
+          "hdrRmse": 0.19239618283976512,
+          "hdrPsnrPeak": 48.8985814053687,
+          "hdrPeak": 53.59515380859375,
+          "hdrRelativeRmse": 0.05852187896671353,
+          "meanAbsRelative": 0.7384961843490601,
+          "referenceMeanRgb": [
+            1.5129473209381104,
+            1.0176522731781006,
+            0.7124474048614502
+          ],
+          "testMeanRgb": [
+            1.5138602256774902,
+            1.01949942111969,
+            0.7138803005218506
+          ],
+          "channelMeanRelativeDelta": [
+            0.0006033949321135879,
+            0.0018151071853935719,
+            0.002011229982599616
+          ],
+          "maxChannelMeanRelativeDelta": 0.002011229982599616,
+          "flip": 0.07737988978624344,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -3.683295488357544,
+            "stopExposure": 2.2158803939819336,
+            "numExposures": 6,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.002011229982599616,
+          "hdrPsnrPeakDb": 48.8985814053687,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    },
+    {
+      "scenario": "interior_move",
+      "evaluationFrame": 96,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.03983652964234352,
+          "hdrRmse": 0.19959090571051458,
+          "hdrPsnrPeak": 49.55115751176072,
+          "hdrPeak": 59.9375,
+          "hdrRelativeRmse": 0.05725647225944128,
+          "meanAbsRelative": 0.7957444190979004,
+          "referenceMeanRgb": [
+            1.5735584497451782,
+            1.0993969440460205,
+            0.7635571956634521
+          ],
+          "testMeanRgb": [
+            1.5742731094360352,
+            1.1008774042129517,
+            0.7645227313041687
+          ],
+          "channelMeanRelativeDelta": [
+            0.0004541678645182401,
+            0.0013466111849993467,
+            0.0012645230162888765
+          ],
+          "maxChannelMeanRelativeDelta": 0.0013466111849993467,
+          "flip": 0.07862528413534164,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -4.3767523765563965,
+            "stopExposure": 2.2553744316101074,
+            "numExposures": 7,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.0013466111849993467,
+          "hdrPsnrPeakDb": 49.55115751176072,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    },
+    {
+      "scenario": "exterior_static",
+      "evaluationFrame": 1,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.0440785214304924,
+          "hdrRmse": 0.20994885432050445,
+          "hdrPsnrPeak": 48.350165482327306,
+          "hdrPeak": 54.90625,
+          "hdrRelativeRmse": 0.06534173932469607,
+          "meanAbsRelative": 0.4658539593219757,
+          "referenceMeanRgb": [
+            1.0333985090255737,
+            1.0144444704055786,
+            0.8180289268493652
+          ],
+          "testMeanRgb": [
+            1.0344111919403076,
+            1.015512466430664,
+            0.8185272812843323
+          ],
+          "channelMeanRelativeDelta": [
+            0.0009799539111554623,
+            0.0010527890408411622,
+            0.0006092137191444635
+          ],
+          "maxChannelMeanRelativeDelta": 0.0010527890408411622,
+          "flip": 0.06545465439558029,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -4.3767523765563965,
+            "stopExposure": 2.33544659614563,
+            "numExposures": 7,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.0010527890408411622,
+          "hdrPsnrPeakDb": 48.350165482327306,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    },
+    {
+      "scenario": "exterior_move",
+      "evaluationFrame": 96,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.055635400116443634,
+          "hdrRmse": 0.23587157547369636,
+          "hdrPsnrPeak": 44.49216238985667,
+          "hdrPeak": 39.5625,
+          "hdrRelativeRmse": 0.08116059137637277,
+          "meanAbsRelative": 0.40483298897743225,
+          "referenceMeanRgb": [
+            0.8922661542892456,
+            0.9084411263465881,
+            0.7423728108406067
+          ],
+          "testMeanRgb": [
+            0.8879448771476746,
+            0.9050302505493164,
+            0.7393971681594849
+          ],
+          "channelMeanRelativeDelta": [
+            0.00484303617849946,
+            0.003754646982997656,
+            0.004008286166936159
+          ],
+          "maxChannelMeanRelativeDelta": 0.00484303617849946,
+          "flip": 0.07054877281188965,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -4.010986804962158,
+            "stopExposure": 2.4036903381347656,
+            "numExposures": 7,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.00484303617849946,
+          "hdrPsnrPeakDb": 44.49216238985667,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    },
+    {
+      "scenario": "lamps_static",
+      "evaluationFrame": 1,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.03822091966867447,
+          "hdrRmse": 0.1955017127001052,
+          "hdrPsnrPeak": 50.09458901884771,
+          "hdrPeak": 62.5,
+          "hdrRelativeRmse": 0.15449208364811065,
+          "meanAbsRelative": 0.785280168056488,
+          "referenceMeanRgb": [
+            0.30369535088539124,
+            0.3472966253757477,
+            0.38782617449760437
+          ],
+          "testMeanRgb": [
+            0.3029361069202423,
+            0.34698161482810974,
+            0.3868049681186676
+          ],
+          "channelMeanRelativeDelta": [
+            0.002500018337741494,
+            0.0009070360101759434,
+            0.002633154857903719
+          ],
+          "maxChannelMeanRelativeDelta": 0.002633154857903719,
+          "flip": 0.10511395335197449,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -3.7415876388549805,
+            "stopExposure": 3.7519617080688477,
+            "numExposures": 8,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.002633154857903719,
+          "hdrPsnrPeakDb": 50.09458901884771,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    },
+    {
+      "scenario": "lamps_move",
+      "evaluationFrame": 96,
+      "primary": {
+        "lowFrames": 800,
+        "highFrames": 1600,
+        "metrics": {
+          "hdrMse": 0.03789239004254341,
+          "hdrRmse": 0.1946596774952209,
+          "hdrPsnrPeak": 53.48433381108588,
+          "hdrPeak": 91.9375,
+          "hdrRelativeRmse": 0.1457751164192165,
+          "meanAbsRelative": 0.8834807276725769,
+          "referenceMeanRgb": [
+            0.2990671694278717,
+            0.3670361638069153,
+            0.4086001515388489
+          ],
+          "testMeanRgb": [
+            0.2993634343147278,
+            0.3672873079776764,
+            0.408250093460083
+          ],
+          "channelMeanRelativeDelta": [
+            0.0009906298946589231,
+            0.0006842490984126925,
+            0.0008567252662032843
+          ],
+          "maxChannelMeanRelativeDelta": 0.0009906298946589231,
+          "flip": 0.10122083127498627,
+          "flipAvailable": true,
+          "flipParameters": {
+            "ppd": 67.02064514160156,
+            "startExposure": -4.525570869445801,
+            "stopExposure": 3.7537283897399902,
+            "numExposures": 9,
+            "tonemapper": "aces"
+          }
+        },
+        "assessment": {
+          "pass": true,
+          "maxChannelMeanRelativeDelta": 0.0009906298946589231,
+          "hdrPsnrPeakDb": 53.48433381108588,
+          "reasons": []
+        }
+      },
+      "pass": true,
+      "status": "converged"
+    }
+  ],
+  "runtime": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "browserVersion": "149.0.7827.55",
+    "playwrightVersion": "1.61.1",
+    "metrics": {
+      "python": "3.12.13",
+      "numpy": "2.3.5",
+      "flipEvaluator": "1.7"
+    },
+    "gpu": {
+      "adapterInfo": {
+        "vendor": "nvidia",
+        "architecture": "ampere",
+        "device": "",
+        "description": "",
+        "accumulationFormat": "rgba32float",
+        "features": [
+          "depth32float-stencil8",
+          "rg11b10ufloat-renderable",
+          "bgra8unorm-storage",
+          "texture-formats-tier1",
+          "chromium-experimental-multi-draw-indirect",
+          "texture-compression-bc",
+          "dual-source-blending",
+          "core-features-and-limits",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "float32-filterable",
+          "indirect-first-instance",
+          "float32-blendable",
+          "depth-clip-control",
+          "texture-compression-bc-sliced-3d",
+          "timestamp-query",
+          "texture-formats-tier2",
+          "clip-distances",
+          "shader-f16",
+          "primitive-index",
+          "texture-component-swizzle",
+          "subgroups"
+        ],
+        "limits": {
+          "maxTextureDimension2D": 16384,
+          "maxStorageBufferBindingSize": 2147483644,
+          "maxStorageBuffersPerShaderStage": 16,
+          "maxComputeInvocationsPerWorkgroup": 1024,
+          "maxComputeWorkgroupSizeX": 1024,
+          "maxComputeWorkgroupSizeY": 1024,
+          "maxComputeWorkgroupSizeZ": 64,
+          "maxComputeWorkgroupsPerDimension": 65535
+        }
+      },
+      "text": "nvidia / ampere",
+      "nvidiaGpus": [
+        "NVIDIA GeForce RTX 3080"
+      ],
+      "launchArgs": [
+        "--no-sandbox",
+        "--enable-unsafe-webgpu",
+        "--force_high_performance_gpu",
+        "--ignore-gpu-blocklist",
+        "--disable-software-rasterizer",
+        "--disable-gpu-vsync",
+        "--disable-frame-rate-limit",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows"
+      ],
+      "executablePath": "C:\\Users\\saege\\AppData\\Local\\ms-playwright\\chromium-1228\\chrome-win64\\chrome.exe",
+      "timestampQuery": {
+        "requested": true,
+        "supported": true,
+        "warmupFrames": 4
+      }
+    }
+  }
+}

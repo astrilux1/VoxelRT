@@ -6,6 +6,9 @@
 // Paper protocol shape:
 //   node test/bench.mjs --suite ablation --resolution 1920x1080 --scale 1 --flip
 //   node test/bench.mjs --suite convergence --resolution 1920x1080 --scale 1 --flip
+//   npm.cmd run bench:references         # strict claim preflight + reference convergence
+//   npm.cmd run bench:correctness        # strict unbiased estimator convergence gate
+//   node test/bench.mjs --claim ...      # fail closed on manifest/runtime drift
 //
 // The harness captures linear HDR RGB before exposure/tonemap, caches converged
 // base references, optionally scores with HDR-FLIP via flip-evaluator, and
@@ -15,8 +18,8 @@ import { chromium } from 'playwright';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assessAdapter,
@@ -25,6 +28,19 @@ import {
   getArg,
   hasFlag,
 } from './gpu-launch.mjs';
+import {
+  assessReferenceConvergence,
+  claimIdentity,
+  claimSettingsProblems,
+  loadClaimManifest,
+  referenceMetadataMismatches,
+} from './claim-manifest.mjs';
+import {
+  assessEstimatorCorrectness,
+  correctnessClaimProblems,
+  correctnessIdentity,
+  loadCorrectnessManifest,
+} from './correctness-manifest.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const EVALDIR = join(ROOT, 'test', 'eval');
@@ -42,17 +58,53 @@ const parseSize = (s) => {
   return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
 };
 
+const claimPreflightOnly = flag('--claim-preflight');
+const claimMode = flag('--claim') || claimPreflightOnly;
+const validateRefs = flag('--validate-refs');
+const manifestPath = resolve(arg('--manifest', join(EVALDIR, 'claim-manifest.v1.json')));
+const loadedManifest = await loadClaimManifest(manifestPath);
+const manifest = loadedManifest.data;
+const manifestIdentity = claimIdentity(loadedManifest);
 const suite = arg('--suite', 'smoke');
-const view = parseSize(arg('--resolution', '1920x1080'));
-const renderScale = arg('--scale', '1');
-const bounces = arg('--bounces', '2');
-const denoise = arg('--denoise', '0');
+const correctnessMode = suite === 'correctness';
+const correctnessManifestPath = resolve(arg(
+  '--correctness-manifest',
+  join(EVALDIR, 'correctness-manifest.v1.json'),
+));
+const loadedCorrectness = correctnessMode
+  ? await loadCorrectnessManifest(correctnessManifestPath)
+  : null;
+const correctness = loadedCorrectness?.data ?? null;
+if (correctnessMode) {
+  if (!claimMode) throw new Error('the correctness suite requires --claim');
+  if (validateRefs || flag('--refs')) {
+    throw new Error('the correctness suite cannot be combined with reference-only modes');
+  }
+  const problems = correctnessClaimProblems(correctness, manifest, manifestIdentity);
+  if (problems.length) throw new Error(`correctness manifest mismatch:\n- ${problems.join('\n- ')}`);
+}
+const frozenConfigurations = correctnessMode ? correctness.configurations : manifest.configurations;
+const claimResolution = `${manifest.capture.resolution.width}x${manifest.capture.resolution.height}`;
+const view = parseSize(arg('--resolution', claimMode ? claimResolution : '1920x1080'));
+const renderScale = arg('--scale', claimMode ? manifest.capture.renderScale : '1');
+const bounces = arg('--bounces', claimMode
+  ? String(correctnessMode ? correctness.capture.bounces : manifest.capture.operatingBounces)
+  : '6');
+const denoise = arg('--denoise', claimMode ? manifest.capture.denoise : '0');
 const timing = !flag('--no-timing');
-const timingWarmup = parseInt(arg('--time-warmup', '4'), 10);
-const refFrames = parseInt(arg('--ref-frames', suite === 'smoke' ? '16' : '1600'), 10);
-const framesDefault = parseInt(arg('--frames', suite === 'smoke' ? '8' : '64'), 10);
+const timingWarmup = parseInt(arg('--time-warmup', String(manifest.capture.timing.warmupFrames)), 10);
+const refFrames = parseInt(arg('--ref-frames', claimMode
+  ? String(manifest.reference.targetFrames)
+  : suite === 'smoke' ? '16' : '1600'), 10);
+// References use a much deeper bounce cut than the real-time operating point:
+// this interior's Neumann series still gains +0.3% R from bounce 8 to 10. A
+// shallow bounce-count reference poisons every bias/FLIP number.
+const refBounces = parseInt(arg('--ref-bounces', String(manifest.reference.bounces)), 10);
+const framesDefault = parseInt(arg('--frames', correctnessMode
+  ? String(correctness.capture.frames)
+  : suite === 'smoke' ? '8' : '64'), 10);
 const repeats = parseInt(arg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
-const wantFlip = flag('--flip') || suite === 'paper';
+const wantFlip = claimMode || flag('--flip') || suite === 'paper';
 const forceRefs = flag('--force-refs');
 const refsOnly = flag('--refs');
 const allowSoftwareGpu = flag('--allow-software-gpu');
@@ -79,83 +131,143 @@ function findPythonExecutable() {
 
 const python = arg('--python', findPythonExecutable());
 
+function pythonRuntimeVersions() {
+  const code = [
+    'import importlib.metadata as m, json, sys',
+    'print(json.dumps({"python": sys.version.split()[0], "numpy": m.version("numpy"), "flipEvaluator": m.version("flip-evaluator")}))',
+  ].join('; ');
+  const r = spawnSync(python, ['-c', code], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    if (claimMode) throw new Error(`claim preflight could not inspect Python metrics: ${r.stderr || r.stdout}`);
+    return { error: String(r.stderr || r.stdout).trim() };
+  }
+  return JSON.parse(r.stdout);
+}
+
 if (flag('--install-flip')) {
   const r = spawnSync(python, ['-m', 'pip', 'install', 'flip-evaluator'], { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
 
+const playwrightPackage = JSON.parse(await readFile(join(ROOT, 'node_modules', 'playwright', 'package.json'), 'utf8'));
+const metricRuntime = (claimMode || wantFlip) ? pythonRuntimeVersions() : null;
+
 // interior: Cornell-style room dominated by emissive voxel faces.
 // exterior: spawn-point terrain with sun/sky/lantern GI.
-const POSES = {
-  interior: { px: 8.8, py: 4.7, pz: 7.0, yaw: -0.45, pitch: 0.02 },
-  exterior: { px: 8.0, py: 4.9, pz: 4.6, yaw: 0.85, pitch: -0.10 },
-};
-const MOVE_AMP = 0.6;
-const MOVE_FRAMES = 96;
-
-const SCENARIOS = {
-  interior_static: { pose: POSES.interior, frames: framesDefault },
-  interior_move: { pose: POSES.interior, frames: Math.max(framesDefault, MOVE_FRAMES), move: MOVE_AMP },
-  exterior_static: { pose: POSES.exterior, frames: framesDefault },
-  exterior_move: { pose: POSES.exterior, frames: Math.max(framesDefault, MOVE_FRAMES), move: MOVE_AMP },
-};
+// lamps: `?scene=lamps` room variant with heterogeneous emitters (tiny bright
+//        warm lamps, medium colored panels, large dim cool strips, occluders)
+//        so light-selection techniques have signal; pose sees all classes.
+// A scenario may pin a scene variant; `scene` is appended to every query for
+// that scenario (test runs *and* its cached reference build).
+const SCENARIOS = Object.fromEntries(Object.entries(manifest.scenarios).map(([name, scen]) => [name, {
+  pose: scen.pose,
+  scene: scen.scene,
+  move: scen.motion?.amplitude,
+  motionStep: scen.motion?.angularStep,
+  referenceFrame: scen.referenceFrame,
+}]));
 
 const BASE_CONFIGS = {
-  base: 'preset=base',
-  gi: 'preset=gi',
-  lin: 'preset=lin',
-  ours: 'preset=ours',
-  ours_no_lightpower: 'preset=ours&lightpower=0',
-  ours_no_dup: 'preset=ours&dupmap=0',
+  base: 'preset=base&fclamp=0',
+  gi: 'preset=gi&fclamp=0',
+  gi_unbiased: 'preset=gi&maxhist=1000000&fclamp=0',
+  lin: 'preset=lin&fclamp=0',
+  lin_unbiased: 'preset=lin&dupmap=0&footprint=0&maxhist=1000000&fclamp=0',
+  ours: 'preset=ours&fclamp=0',
+  ours_motion: 'preset=ours_motion&maxhist=64&fclamp=0',
+  ours_unbiased: 'preset=ours&dupmap=0&rclamp=0&fclamp=0',
+  ours_no_lightpower: 'preset=ours&lightpower=0&fclamp=0',
+  ours_no_dup: 'preset=ours&dupmap=0&fclamp=0',
+  ours_adaptcand: 'preset=ours&adaptcand=1&fclamp=0',
+  ours_lightgrid: 'preset=ours&lightgrid=1&fclamp=0',
+  ours_adapt_lightgrid: 'preset=ours&adaptcand=1&lightgrid=1&fclamp=0',
+  ours_sigma24: 'preset=ours&sigma=24&fclamp=0',
+  ours_sigma32: 'preset=ours&sigma=32&fclamp=0',
+  ours_sigma48: 'preset=ours&sigma=48&fclamp=0',
+  ours_mixsigma24: 'preset=ours&mixsigma=1&sigma2=24&fclamp=0',
+  ours_mixsigma32: 'preset=ours&mixsigma=1&sigma2=32&fclamp=0',
+  ours_mixsigma48: 'preset=ours&mixsigma=1&sigma2=48&fclamp=0',
+  ours_mixsigma: 'preset=ours&mixsigma=1&fclamp=0',
+  gi_histisolate: 'preset=gi&histisolate=1&maxhist=1000000&fclamp=0',
+  unified_histisolate: 'preset=gi&unified=1&histisolate=1&maxhist=1000000&fclamp=0',
+  lin_histisolate: 'preset=lin&dupmap=0&footprint=0&histisolate=1&maxhist=1000000&fclamp=0',
+  ours_histisolate: 'preset=ours&dupmap=0&rclamp=0&footprint=0&histisolate=1&maxhist=1000000&fclamp=0',
 };
 
 // Existing renderer flags mapped into the paper's ablation shape. The early
 // rows are not meant to reproduce Falcor micro-optimization rows; they isolate
 // the same algorithmic additions this voxel renderer exposes.
 const ABLATIONS = {
-  gi: 'preset=gi',
-  unified: 'preset=gi&unified=1',
-  paired: 'preset=gi&unified=1&paired=1',
-  footprint: 'preset=gi&unified=1&paired=1&footprint=1',
-  dupmap: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1',
-  vector: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1&vector=1',
-  lin: 'preset=lin',
-  ours_no_lightpower: 'preset=ours&lightpower=0',
-  ours_no_dup: 'preset=ours&dupmap=0',
-  ours: 'preset=ours',
+  gi: 'preset=gi&fclamp=0',
+  unified: 'preset=gi&unified=1&fclamp=0',
+  paired: 'preset=gi&unified=1&paired=1&fclamp=0',
+  footprint: 'preset=gi&unified=1&paired=1&footprint=1&fclamp=0',
+  dupmap: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1&fclamp=0',
+  vector: 'preset=gi&unified=1&paired=1&footprint=1&dupmap=1&vector=1&fclamp=0',
+  lin: 'preset=lin&fclamp=0',
+  ours_no_lightpower: 'preset=ours&lightpower=0&fclamp=0',
+  ours_no_dup: 'preset=ours&dupmap=0&fclamp=0',
+  ours: 'preset=ours&fclamp=0',
 };
 
 const CONVERGENCE = {
-  base: 'preset=base',
-  lin: 'preset=lin',
-  ours_no_dup: 'preset=ours&dupmap=0',
-  ours: 'preset=ours',
+  base: 'preset=base&fclamp=0',
+  lin: 'preset=lin&fclamp=0',
+  ours_unbiased: 'preset=ours&dupmap=0&rclamp=0&fclamp=0',
+  ours: 'preset=ours&fclamp=0',
+  // World-space GI cache (docs/WORLDGI.md §7.4 thesis test): identical to
+  // `ours` plus the persistent brick/face reuse cache, so `ours` is the exact
+  // screen-only control that does the same non-cache work.
+  ours_worldgi: 'preset=ours&worldgi=1&fclamp=0',
+  ours_worldgi_cap1: 'preset=ours&worldgi=1&wgicap=1&fclamp=0',
+  ours_worldgi_cap4: 'preset=ours&worldgi=1&wgicap=4&fclamp=0',
 };
 
-const defaultScenarios = suite === 'smoke' ? 'interior_static' : 'interior_static,interior_move,exterior_static,exterior_move';
+const defaultScenarios = correctnessMode
+  ? correctness.scenarios.join(',')
+  : claimMode
+    ? Object.keys(SCENARIOS).join(',')
+    : suite === 'smoke' ? 'interior_static' : 'interior_static,interior_move,exterior_static,exterior_move';
 const scenarioNames = parseList(arg('--scenarios', defaultScenarios));
-const defaultConfigs = suite === 'ablation'
+const defaultConfigs = correctnessMode
+  ? Object.keys(correctness.configurations).join(',')
+  : suite === 'ablation'
   ? Object.keys(ABLATIONS).join(',')
   : suite === 'convergence'
     ? Object.keys(CONVERGENCE).join(',')
     : 'base,lin,ours';
 const configNames = parseList(arg('--configs', defaultConfigs));
-const frameList = parseList(arg('--frame-list', suite === 'convergence' ? '1,2,4,8,16,32,64,96,128' : String(framesDefault)))
+const frameList = parseList(arg(
+  '--frame-list',
+  suite === 'convergence' ? '1,2,4,8,16,32,64,96,128' : String(framesDefault),
+))
   .map((x) => parseInt(x, 10));
 
 function configQuery(name) {
-  if (suite === 'ablation' && ABLATIONS[name]) return ABLATIONS[name];
-  if (suite === 'convergence' && CONVERGENCE[name]) return CONVERGENCE[name];
-  return BASE_CONFIGS[name] || name;
+  let query;
+  if (correctnessMode && correctness.configurations[name]) query = correctness.configurations[name];
+  else if (suite === 'ablation' && ABLATIONS[name]) query = ABLATIONS[name];
+  else if (suite === 'convergence' && CONVERGENCE[name]) query = CONVERGENCE[name];
+  else query = BASE_CONFIGS[name] || name;
+  if (claimMode && frozenConfigurations[name] !== query) {
+    throw new Error(`claim configuration ${name} is not frozen or drifted (resolved ${query})`);
+  }
+  return query;
 }
 
 function poseQuery(p) {
   return `px=${p.px}&py=${p.py}&pz=${p.pz}&yaw=${p.yaw}&pitch=${p.pitch}`;
 }
 
-function finalPose(scen) {
+// Scene-variant fragment for a scenario ('' for the default scene, so all
+// pre-existing scenario queries — and their cached references — are unchanged).
+function sceneQuery(scen) {
+  return scen.scene ? `&scene=${scen.scene}` : '';
+}
+
+function finalPose(scen, evaluationFrame = scen.referenceFrame) {
   const pose = { ...scen.pose };
-  if (scen.move) pose.px += Math.sin((scen.frames - 1) * 0.07) * scen.move;
+  if (scen.move) pose.px += Math.sin((evaluationFrame - 1) * scen.motionStep) * scen.move;
   return pose;
 }
 
@@ -164,6 +276,9 @@ function buildQuery(query, frames) {
   if (!p.has('scale')) p.set('scale', renderScale);
   if (!p.has('bounces')) p.set('bounces', bounces);
   if (!p.has('denoise')) p.set('denoise', denoise);
+  if (claimMode && !p.has('fclamp')) {
+    p.set('fclamp', String(manifest.capture.fireflyClamp));
+  }
   p.set('nocanvas', '1');
   p.set('stopat', String(frames));
   if (timing) {
@@ -206,6 +321,39 @@ const port = server.address().port;
 const launch = chromiumLaunchOptions({ benchmark: true });
 const browser = await chromium.launch(launch);
 const browserVersion = browser.version();
+if (claimMode) {
+  const configQueries = Object.fromEntries(configNames.map((name) => [name, configQuery(name)]));
+  const settingsProfile = correctnessMode ? {
+    bounces: correctness.capture.bounces,
+    scenarios: correctness.scenarios,
+    frameCheckpoints: [correctness.capture.frames],
+    configurations: correctness.configurations,
+    requireExact: true,
+  } : undefined;
+  const problems = claimSettingsProblems(manifest, {
+    resolution: view,
+    renderScale,
+    bounces,
+    denoise,
+    timing,
+    timingWarmup,
+    refBounces,
+    refFrames,
+    wantFlip,
+    launchArgs: launch.args,
+    playwrightVersion: playwrightPackage.version,
+    browserVersion,
+    flipEvaluatorVersion: metricRuntime?.flipEvaluator,
+    scenarios: scenarioNames,
+    frameList,
+    configQueries,
+  }, settingsProfile);
+  if (problems.length) {
+    await browser.close();
+    server.close();
+    throw new Error(`claim manifest mismatch:\n- ${problems.join('\n- ')}`);
+  }
+}
 const page = await browser.newPage({ viewport: view, deviceScaleFactor: 1 });
 let pageError = null;
 let adapterDiagnostics = null;
@@ -223,6 +371,23 @@ function validateAdapter(adapterInfo) {
     requireNvidia,
     label: 'Chromium WebGPU adapter',
   });
+  if (claimMode) {
+    const features = new Set(adapterInfo?.features || []);
+    const hostMatch = (nvidiaGpus || []).includes(manifest.runtime.hostGpu);
+    if (!hostMatch) throw new Error(`claim requires host GPU ${manifest.runtime.hostGpu}`);
+    if (String(adapterInfo?.vendor).toLowerCase() !== manifest.runtime.adapterVendor.toLowerCase()) {
+      throw new Error(`claim requires adapter vendor ${manifest.runtime.adapterVendor}, got ${adapterInfo?.vendor}`);
+    }
+    if (String(adapterInfo?.architecture).toLowerCase() !== manifest.runtime.adapterArchitecture.toLowerCase()) {
+      throw new Error(`claim requires adapter architecture ${manifest.runtime.adapterArchitecture}, got ${adapterInfo?.architecture}`);
+    }
+    for (const feature of manifest.runtime.requiredFeatures) {
+      if (!features.has(feature)) throw new Error(`claim requires WebGPU feature ${feature}`);
+    }
+    if (adapterInfo?.accumulationFormat !== manifest.runtime.accumulationFormat) {
+      throw new Error(`claim requires ${manifest.runtime.accumulationFormat} accumulation, got ${adapterInfo?.accumulationFormat}`);
+    }
+  }
   adapterDiagnostics = {
     adapterInfo,
     text: assessed.text,
@@ -243,6 +408,9 @@ function recordTimingContext(gpuTiming) {
     warmupFrames: timingWarmup,
     error: gpuTiming?.error,
   };
+  if (claimMode && (!gpuTiming?.requested || !gpuTiming?.supported)) {
+    throw new Error(`claim requires working timestamp queries: ${gpuTiming?.error || 'unsupported'}`);
+  }
 }
 
 async function render(query, frames, { hdr = true } = {}) {
@@ -280,6 +448,9 @@ async function render(query, frames, { hdr = true } = {}) {
     gpuTiming: window.__voxelrt.gpuTiming,
     adapterInfo: window.__voxelrt.adapterInfo,
   }));
+  if (claimMode && hdr && cap.hdrFormat !== manifest.capture.hdrFormat) {
+    throw new Error(`claim requires HDR format ${manifest.capture.hdrFormat}, got ${cap.hdrFormat}`);
+  }
   return {
     rgb: Buffer.from(cap.rgb, 'base64'),
     png: Buffer.from(cap.png.split(',')[1], 'base64'),
@@ -425,7 +596,11 @@ async function score(refPath, testPath, w, h) {
   if (r.status !== 0) {
     throw new Error(`metrics failed: ${r.stderr || r.stdout}`);
   }
-  return JSON.parse(r.stdout);
+  const metrics = JSON.parse(r.stdout);
+  if (claimMode && !metrics.flipAvailable) {
+    throw new Error(`claim requires HDR-FLIP: ${metrics.flipError || 'flip-evaluator unavailable'}`);
+  }
+  return metrics;
 }
 
 async function writeCapture(stem, capture, extraMeta = {}) {
@@ -447,41 +622,140 @@ async function writeCapture(stem, capture, extraMeta = {}) {
   return { f32, png, meta };
 }
 
-async function reference(name, scen) {
+function referenceRuntime() {
+  return {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    browserVersion,
+    playwrightVersion: playwrightPackage.version,
+    metrics: metricRuntime,
+    gpu: adapterDiagnostics,
+  };
+}
+
+async function reference(name, scen, referenceFrames = refFrames, evaluationFrame = scen.referenceFrame) {
   await mkdir(REFDIR, { recursive: true });
-  const stem = `${safe(name)}_${view.width}x${view.height}_s${safe(renderScale)}_b${bounces}`;
+  const motionStem = scen.move ? `_at${evaluationFrame}f` : '';
+  const claimStem = claimMode ? `_cm${manifest.schemaVersion}_${loadedManifest.sha256.slice(0, 12)}` : '';
+  const stem = `${safe(name)}_${view.width}x${view.height}_s${safe(renderScale)}` +
+    `_rb${refBounces}_rf${referenceFrames}${motionStem}${claimStem}`;
   const f32 = join(REFDIR, `${stem}.rgbf32`);
   const png = join(REFDIR, `${stem}.png`);
   const metaPath = join(REFDIR, `${stem}.json`);
-  const pose = finalPose(scen);
+  const pose = finalPose(scen, evaluationFrame);
+  const maxHistory = manifest.reference.maxHistory;
+  const seed = manifest.reference.seed;
+  const query = `preset=base&denoise=0&maxhist=${maxHistory}&bounces=${refBounces}` +
+    `&fclamp=${manifest.capture.fireflyClamp}` +
+    `&scale=${renderScale}&fseed=${seed}&${poseQuery(pose)}${sceneQuery(scen)}`;
   const meta = {
     scenario: name,
+    evaluationFrame,
     pose,
-    frames: refFrames,
+    frames: referenceFrames,
     width: view.width,
     height: view.height,
     scale: renderScale,
-    bounces,
-    query: `preset=base&denoise=0&maxhist=1000000&${poseQuery(pose)}`,
+    bounces: refBounces,
+    seed,
+    query,
+    hdrFormat: manifest.capture.hdrFormat,
+    ...(claimMode ? { claimManifest: manifestIdentity } : {}),
   };
-  if (!forceRefs && existsSync(f32) && existsSync(metaPath)) {
-    const old = JSON.parse(await readFile(metaPath, 'utf8'));
-    if (old.width === meta.width && old.height === meta.height &&
-        old.scale === meta.scale && old.bounces === meta.bounces &&
-        old.frames === meta.frames && old.query === meta.query) {
-      return { f32, png, meta: old };
+  if (!forceRefs && existsSync(f32) && existsSync(png) && existsSync(metaPath)) {
+    try {
+      const old = JSON.parse(await readFile(metaPath, 'utf8'));
+      const mismatches = referenceMetadataMismatches(old, meta);
+      const expectedBytes = view.width * view.height * 3 * 4;
+      const bytes = (await stat(f32)).size;
+      if (bytes !== expectedBytes) mismatches.push(`HDR byte length ${bytes} != ${expectedBytes}`);
+      if (!mismatches.length) return { f32, png, meta: old };
+      console.warn(`  rejecting cached reference ${stem}: ${mismatches.join(', ')}`);
+    } catch (error) {
+      console.warn(`  rejecting unreadable cached reference ${stem}: ${error.message}`);
     }
   }
-  console.log(`  building HDR reference ${name} (${refFrames} frames, ${view.width}x${view.height})...`);
-  const r = await render(meta.query, refFrames, { hdr: true });
+  console.log(`  building HDR reference ${name} at evaluation frame ${evaluationFrame} ` +
+    `(${referenceFrames} reference frames, ${view.width}x${view.height})...`);
+  const r = await render(meta.query, referenceFrames, { hdr: true });
+  if (r.hdrFormat !== manifest.capture.hdrFormat) {
+    throw new Error(`reference HDR format ${r.hdrFormat} does not match ${manifest.capture.hdrFormat}`);
+  }
   await writeFile(f32, r.hdr);
   await writeFile(png, r.png);
-  await writeFile(metaPath, JSON.stringify({ ...meta, hdrFormat: r.hdrFormat }, null, 2));
+  await writeFile(metaPath, JSON.stringify({ ...meta, runtime: referenceRuntime() }, null, 2));
   return { f32, png, meta };
+}
+
+async function validateReferenceSet() {
+  const configured = claimMode
+    ? [...manifest.reference.convergence.primaryFrames, manifest.reference.convergence.extensionFrame]
+    : parseList(arg('--ref-checkpoints', [
+      ...manifest.reference.convergence.primaryFrames,
+      manifest.reference.convergence.extensionFrame,
+    ].join(','))).map((x) => parseInt(x, 10));
+  if (configured.length !== 3 || configured.some((x) => !Number.isInteger(x) || x <= 0)) {
+    throw new Error('--ref-checkpoints must contain LOW,HIGH,EXTENSION positive frame counts');
+  }
+  const [lowFrames, highFrames, extensionFrames] = configured;
+  const thresholds = manifest.reference.convergence;
+  const rows = [];
+  for (const name of scenarioNames) {
+    const scen = SCENARIOS[name];
+    if (!scen) throw new Error(`unknown scenario ${name}`);
+    const evaluationFrame = scen.referenceFrame;
+    const low = await reference(name, scen, lowFrames, evaluationFrame);
+    const high = await reference(name, scen, highFrames, evaluationFrame);
+    const primaryMetrics = await score(low.f32, high.f32, view.width, view.height);
+    const primary = assessReferenceConvergence(primaryMetrics, thresholds);
+    const row = {
+      scenario: name,
+      evaluationFrame,
+      primary: { lowFrames, highFrames, metrics: primaryMetrics, assessment: primary },
+      pass: primary.pass,
+      status: primary.pass ? 'converged' : 'not-converged',
+    };
+    if (!primary.pass) {
+      const extension = await reference(name, scen, extensionFrames, evaluationFrame);
+      const extensionMetrics = await score(high.f32, extension.f32, view.width, view.height);
+      const extensionAssessment = assessReferenceConvergence(extensionMetrics, thresholds);
+      row.extension = {
+        lowFrames: highFrames,
+        highFrames: extensionFrames,
+        metrics: extensionMetrics,
+        assessment: extensionAssessment,
+      };
+      row.status = extensionAssessment.pass ? 'manifest-update-required' : 'not-converged';
+    }
+    rows.push(row);
+    const pct = (primary.maxChannelMeanRelativeDelta * 100).toFixed(3);
+    console.log(`reference ${name}: ${row.status} | max mean delta ${pct}% | HDR PSNR ${primary.hdrPsnrPeakDb.toFixed(2)} dB`);
+  }
+  const report = {
+    claimManifest: manifestIdentity,
+    claimable: claimMode,
+    resolution: view,
+    thresholds: {
+      maxChannelMeanRelativeDelta: thresholds.maxChannelMeanRelativeDelta,
+      minHdrPsnrPeakDb: thresholds.minHdrPsnrPeakDb,
+    },
+    checkpoints: configured,
+    pass: rows.every((row) => row.pass),
+    rows,
+    runtime: referenceRuntime(),
+  };
+  await mkdir(EVALDIR, { recursive: true });
+  const reportName = claimMode
+    ? `reference-convergence.v${manifest.schemaVersion}.json`
+    : 'reference-convergence.json';
+  await writeFile(join(EVALDIR, reportName), JSON.stringify(report, null, 2));
+  return report;
 }
 
 const shotQ = arg('--shot', null);
 if (shotQ) {
+  if (claimMode) throw new Error('--shot outputs are diagnostic and cannot run with --claim');
   const frames = parseInt(arg('--frames', '32'), 10);
   const out = arg('--out', join(ROOT, 'test', 'shot.png'));
   const r = await render(shotQ, frames, { hdr: true });
@@ -494,16 +768,50 @@ if (shotQ) {
   process.exit(0);
 }
 
+if (claimMode) {
+  const probeScenario = SCENARIOS[scenarioNames[0]];
+  if (!probeScenario) throw new Error(`unknown scenario ${scenarioNames[0]}`);
+  console.log(`Claim preflight: ${manifest.id} ${loadedManifest.sha256.slice(0, 12)}`);
+  await render(`preset=base&${poseQuery(probeScenario.pose)}${sceneQuery(probeScenario)}`,
+    Math.max(timingWarmup + 1, 5), { hdr: true });
+  if (claimPreflightOnly) {
+    console.log('Claim preflight passed: manifest, metrics, browser, adapter, fp32 accumulation, HDR capture, and timestamps.');
+    await browser.close();
+    server.close();
+    process.exit(0);
+  }
+}
+
 const results = [];
 const summaries = [];
-for (const sn of scenarioNames) {
-  const scen = SCENARIOS[sn];
-  if (!scen) throw new Error(`unknown scenario ${sn}`);
-  const ref = await reference(sn, scen);
-  if (refsOnly) continue;
+let referenceValidation = null;
+if (validateRefs) {
+  referenceValidation = await validateReferenceSet();
+} else if (refsOnly) {
+  for (const sn of scenarioNames) {
+    const scen = SCENARIOS[sn];
+    if (!scen) throw new Error(`unknown scenario ${sn}`);
+    await reference(sn, scen, refFrames, scen.referenceFrame);
+  }
+} else {
+  const references = new Map();
+  for (const sn of scenarioNames) {
+    const scen = SCENARIOS[sn];
+    if (!scen) throw new Error(`unknown scenario ${sn}`);
+    const seeds = correctnessMode
+      ? correctness.capture.seeds
+      : claimMode
+        ? manifest.evaluation.qualitySeeds[scen.move ? 'motion' : 'static']
+      : Array.from({ length: repeats }, (_, i) => i * manifest.evaluation.diagnosticSeedStride);
 
-  for (const cn of configNames) {
-    for (const frameCount of frameList) {
+    for (const cn of configNames) {
+      for (const frameCount of frameList) {
+        const evaluationFrame = scen.move ? frameCount : scen.referenceFrame;
+        const refKey = `${sn}:${evaluationFrame}:${refFrames}`;
+        if (!references.has(refKey)) {
+          references.set(refKey, await reference(sn, scen, refFrames, evaluationFrame));
+        }
+        const ref = references.get(refKey);
       let mseSum = 0;
       let flipSum = 0;
       let flipN = 0;
@@ -513,10 +821,11 @@ for (const sn of scenarioNames) {
       let timingFramesSum = 0;
       const groupRows = [];
 
-      for (let rep = 0; rep < repeats; rep++) {
+      for (const [rep, seed] of seeds.entries()) {
         const q = `${configQuery(cn)}&${poseQuery(scen.pose)}` +
+          sceneQuery(scen) +
           (scen.move ? `&benchmove=${scen.move}` : '') +
-          `&fseed=${rep * 7717}`;
+          `&fseed=${seed}`;
         const cap = await render(q, frameCount, { hdr: true });
         const avg = averageTimings(cap.gpuTiming);
         const perf = performanceStats(frameCount, cap.wallMsPerFrame, avg);
@@ -527,6 +836,7 @@ for (const sn of scenarioNames) {
           query: q,
           frames: frameCount,
           repeat: rep,
+          seed,
           perf,
         });
         const m = await score(ref.f32, files.f32, cap.w, cap.h);
@@ -549,10 +859,16 @@ for (const sn of scenarioNames) {
           config: cn,
           frames: frameCount,
           repeat: rep,
+          seed,
           hdrMse: m.hdrMse,
           hdrRmse: m.hdrRmse,
           hdrPsnrPeak: m.hdrPsnrPeak,
+          hdrRelativeRmse: m.hdrRelativeRmse,
           meanAbsRelative: m.meanAbsRelative,
+          referenceMeanRgb: m.referenceMeanRgb,
+          testMeanRgb: m.testMeanRgb,
+          channelMeanRelativeDelta: m.channelMeanRelativeDelta,
+          maxChannelMeanRelativeDelta: m.maxChannelMeanRelativeDelta,
           flip: m.flip,
           flipAvailable: m.flipAvailable,
           flipError: m.flipError,
@@ -568,9 +884,9 @@ for (const sn of scenarioNames) {
         console.log(`${sn.padEnd(16)} ${cn.padEnd(18)} ${String(frameCount).padStart(4)}f r${rep}  ${metric} | ${formatPerf(perf)}`);
       }
 
-      const avgMse = mseSum / repeats;
+      const avgMse = mseSum / groupRows.length;
       const avgFlip = flipN ? flipSum / flipN : null;
-      const avgWall = wallSum / repeats;
+      const avgWall = wallSum / groupRows.length;
       const avgTimings = timingN
         ? Object.fromEntries(Object.entries(timingSums).map(([k, v]) => [k, v / timingN]))
         : null;
@@ -584,11 +900,64 @@ for (const sn of scenarioNames) {
         : '';
       console.log(`  avg ${sn}/${cn}/${frameCount}f: ${summaryMetric} | ${formatPerf(avgPerf)}`);
       if (jitter) console.log(`      repeats ${summary.repeats}${jitter}`);
+      }
     }
   }
 }
 
+let correctnessReport = null;
+if (correctnessMode) {
+  const expectedRows = correctness.scenarios.length *
+    Object.keys(correctness.configurations).length * correctness.capture.seeds.length;
+  if (results.length !== expectedRows) {
+    throw new Error(`correctness suite produced ${results.length} rows; expected ${expectedRows}`);
+  }
+  const rows = results.map((row) => {
+    const metrics = {
+      hdrMse: row.hdrMse,
+      hdrRmse: row.hdrRmse,
+      hdrRelativeRmse: row.hdrRelativeRmse,
+      hdrPsnrPeak: row.hdrPsnrPeak,
+      meanAbsRelative: row.meanAbsRelative,
+      referenceMeanRgb: row.referenceMeanRgb,
+      testMeanRgb: row.testMeanRgb,
+      channelMeanRelativeDelta: row.channelMeanRelativeDelta,
+      maxChannelMeanRelativeDelta: row.maxChannelMeanRelativeDelta,
+      flip: row.flip,
+    };
+    return {
+      scenario: row.scenario,
+      config: row.config,
+      query: configQuery(row.config),
+      frames: row.frames,
+      bounces: Number(bounces),
+      seed: row.seed,
+      metrics,
+      assessment: assessEstimatorCorrectness(metrics, correctness.thresholds),
+    };
+  });
+  correctnessReport = {
+    claimManifest: manifestIdentity,
+    correctnessManifest: correctnessIdentity(loadedCorrectness),
+    claimable: claimMode,
+    resolution: view,
+    reference: correctness.reference,
+    thresholds: correctness.thresholds,
+    pass: rows.every((row) => row.assessment.pass),
+    rows,
+    runtime: referenceRuntime(),
+  };
+}
+
 await mkdir(EVALDIR, { recursive: true });
+if (correctnessReport) {
+  await writeFile(
+    join(EVALDIR, `estimator-correctness.v${correctness.schemaVersion}.json`),
+    JSON.stringify(correctnessReport, null, 2),
+  );
+  const passing = correctnessReport.rows.filter((row) => row.assessment.pass).length;
+  console.log(`\nEstimator correctness: ${passing}/${correctnessReport.rows.length} rows passed.`);
+}
 const settings = {
   suite,
   resolution: view,
@@ -598,23 +967,47 @@ const settings = {
   timing,
   timingWarmup,
   refFrames,
+  refBounces,
   repeats,
+  repeatPolicy: claimMode ? {
+    staticQualitySeeds: manifest.evaluation.qualitySeeds.static,
+    motionQualitySeeds: manifest.evaluation.qualitySeeds.motion,
+    minimumTimingRepeats: manifest.capture.timing.minimumRepeats,
+  } : {
+    diagnosticRepeats: repeats,
+    seedStride: manifest.evaluation.diagnosticSeedStride,
+  },
   scenarios: scenarioNames,
   configs: configNames,
   frameList,
   wantFlip,
+  claim: {
+    enabled: claimMode,
+    claimable: claimMode && (!referenceValidation || referenceValidation.pass),
+    manifestPath,
+    manifest: manifestIdentity,
+  },
+  referenceValidation,
+  correctness: correctnessMode ? {
+    manifestPath: correctnessManifestPath,
+    manifest: correctnessIdentity(loadedCorrectness),
+    report: `estimator-correctness.v${correctness.schemaVersion}.json`,
+    pass: correctnessReport.pass,
+  } : null,
   gpu: adapterDiagnostics,
   runtime: {
     node: process.version,
     platform: process.platform,
     arch: process.arch,
     browserVersion,
+    playwrightVersion: playwrightPackage.version,
+    metrics: metricRuntime,
     argv: process.argv.slice(2),
   },
 };
 await writeFile(join(EVALDIR, 'results.json'), JSON.stringify({ settings, results, summaries }, null, 2));
 const csv = [
-  'scenario,config,frames,repeat,flip,hdrMse,hdrRmse,hdrPsnrPeak,meanAbsRelative,pixels,megapixels,wallMsPerFrame,wallFps,wallRunMs,gpuMsPerFrame,gpuFps,gpuMsPerMegapixel,gpuRunMs,timingFrames,dominantPass,dominantPassPercent,pathtraceMs,reuseTemporalMs,reuseSpatialMs,dupmapMs,temporalMs,atrousMs,pathtracePct,reuseTemporalPct,reuseSpatialPct,dupmapPct,temporalPct,atrousPct',
+  'scenario,config,frames,repeat,seed,flip,hdrMse,hdrRmse,hdrRelativeRmse,hdrPsnrPeak,meanAbsRelative,maxChannelMeanRelativeDelta,referenceMeanR,referenceMeanG,referenceMeanB,testMeanR,testMeanG,testMeanB,pixels,megapixels,wallMsPerFrame,wallFps,wallRunMs,gpuMsPerFrame,gpuFps,gpuMsPerMegapixel,gpuRunMs,timingFrames,dominantPass,dominantPassPercent,pathtraceMs,reuseTemporalMs,reuseSpatialMs,dupmapMs,temporalMs,atrousMs,pathtracePct,reuseTemporalPct,reuseSpatialPct,dupmapPct,temporalPct,atrousPct',
   ...results.map((r) => {
     const g = r.gpuMs || {};
     const p = r.perf || {};
@@ -627,11 +1020,16 @@ const csv = [
       r.config,
       r.frames,
       r.repeat,
+      r.seed,
       r.flip ?? '',
       r.hdrMse,
       r.hdrRmse,
+      r.hdrRelativeRmse,
       r.hdrPsnrPeak,
       r.meanAbsRelative,
+      r.maxChannelMeanRelativeDelta,
+      ...(r.referenceMeanRgb || ['', '', '']),
+      ...(r.testMeanRgb || ['', '', '']),
       p.pixels ?? '',
       p.megapixels ?? '',
       r.wallMsPerFrame,
@@ -710,5 +1108,17 @@ server.close();
 if (wantFlip && results.some((r) => !r.flipAvailable)) {
   console.log('\nHDR-FLIP was requested but not available for at least one row.');
   console.log(`Install it with: ${python} -m pip install flip-evaluator`);
+}
+if (referenceValidation && !referenceValidation.pass) {
+  const reportName = claimMode
+    ? `reference-convergence.v${manifest.schemaVersion}.json`
+    : 'reference-convergence.json';
+  console.error(`\nReference convergence failed. See test/eval/${reportName}.`);
+  process.exitCode = 1;
+}
+if (correctnessReport && !correctnessReport.pass) {
+  const reportName = `estimator-correctness.v${correctness.schemaVersion}.json`;
+  console.error(`\nEstimator correctness failed. See test/eval/${reportName}.`);
+  process.exitCode = 1;
 }
 console.log(`\nWrote ${join(EVALDIR, 'results.json')}, ${join(EVALDIR, 'results.csv')} and ${join(EVALDIR, 'summary.csv')}`);

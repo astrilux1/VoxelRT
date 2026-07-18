@@ -25,8 +25,18 @@
 @group(0) @binding(8) var directOut   : texture_storage_2d<rgba16float, write>;
 // x = alias acceptance probability, y = alias index, z = selection PDF.
 @group(0) @binding(9) var<storage, read> lightAlias : array<vec4<f32>>;
+// Per-brick-cell top-K light table (RF_LIGHTGRID). Per cell, LG_STRIDE words:
+// [count, bitcast<f32> weightSum, (lightIndex, bitcast<f32> weight) × LG_K].
+@group(0) @binding(11) var<storage, read> lightGrid : array<u32>;
 
-const FIREFLY_CLAMP : f32 = 48.0;
+// Firefly clamp, host-injected (?fclamp=, default 48; 0 disables). Clamping
+// improves early images but hides converged energy — bias checks and
+// references should run with it off (RESEARCH_LOOP.md traps).
+const FIREFLY_CLAMP : f32 = FCLAMP_VALUE;
+
+const LG_K : u32 = 16u;                    // entries stored (and used) per cell
+const LG_STRIDE : u32 = 2u + 2u * LG_K;
+const LG_PCELL : f32 = 0.75;               // mixture weight on the cell distribution
 
 struct LightPoint {
   pos  : vec3<f32>,   // world position on the face
@@ -35,23 +45,86 @@ struct LightPoint {
   pdfA : f32,         // area-measure pdf
 };
 
-fn sampleLightFace() -> LightPoint {
-  var lp : LightPoint;
+// Global light selection (power alias table when RF_LIGHTPOWER, else uniform).
+fn sampleGlobalLightIndex() -> u32 {
   let count = u.params2.y;
-  var li : u32;
-  var pdfSelect : f32;
   if (rflag(RF_LIGHTPOWER)) {
     let uLight = rand() * f32(count);
     let base = min(u32(uLight), count - 1u);
     let frac = uLight - f32(base);
     let rec = lightAlias[base];
     let aliasLi = min(u32(rec.y + 0.5), count - 1u);
-    li = select(base, aliasLi, frac >= rec.x);
-    pdfSelect = max(lightAlias[li].z, 1e-8);
-  } else {
-    li = min(u32(rand() * f32(count)), count - 1u);
-    pdfSelect = 1.0 / f32(count);
+    return select(base, aliasLi, frac >= rec.x);
   }
+  return min(u32(rand() * f32(count)), count - 1u);
+}
+
+fn globalLightPdf(li : u32) -> f32 {
+  if (rflag(RF_LIGHTPOWER)) { return max(lightAlias[li].z, 1e-8); }
+  return 1.0 / f32(u.params2.y);
+}
+
+struct LightPick {
+  li  : u32,   // light-list index
+  pdf : f32,   // exact selection pdf (discrete, over the light list)
+};
+
+// Pick one emissive face for NEE at shading position `pos` (meters).
+// RF_LIGHTGRID: draw from a mixture — with probability LG_PCELL from the
+// receiver cell's top-K distribution (w_i / W_cell), else from the global
+// distribution. The returned pdf is the EXACT mixture pdf
+//   p(i) = LG_PCELL * p_cell(i) + (1 - LG_PCELL) * p_global(i),
+// which is > 0 for every light (the global component covers the tail), so
+// RIS weights built from it stay unbiased. Cells with no usable entries fall
+// back to pure global sampling.
+fn pickLightIndex(pos : vec3<f32>) -> LightPick {
+  var pick : LightPick;
+  if (!rflag(RF_LIGHTGRID)) {
+    pick.li = sampleGlobalLightIndex();
+    pick.pdf = globalLightPdf(pick.li);
+    return pick;
+  }
+  let bc = clamp(vec3<i32>(floor(pos * (INV_VOXEL / f32(BRICK)))),
+                 vec3<i32>(0), vec3<i32>(BGRID - 1));
+  let base = u32(bc.x + bc.y * BGRID + bc.z * BGRID * BGRID) * LG_STRIDE;
+  let n = min(lightGrid[base], LG_K);
+  let wSum = bitcast<f32>(lightGrid[base + 1u]);
+  if (n == 0u || wSum <= 0.0) {
+    pick.li = sampleGlobalLightIndex();
+    pick.pdf = globalLightPdf(pick.li);
+    return pick;
+  }
+  var li : u32;
+  if (rand() < LG_PCELL) {
+    // Draw from the cell's top-K distribution by cumulative weight.
+    var r = rand() * wSum;
+    li = lightGrid[base + 2u];
+    for (var k = 0u; k < n; k++) {
+      li = lightGrid[base + 2u + 2u * k];
+      r -= bitcast<f32>(lightGrid[base + 3u + 2u * k]);
+      if (r <= 0.0) { break; }
+    }
+  } else {
+    li = sampleGlobalLightIndex();
+  }
+  // Exact mixture pdf: linear scan for the cell weight of the chosen light.
+  var pCell = 0.0;
+  for (var k = 0u; k < n; k++) {
+    if (lightGrid[base + 2u + 2u * k] == li) {
+      pCell = bitcast<f32>(lightGrid[base + 3u + 2u * k]) / wSum;
+      break;
+    }
+  }
+  pick.li = li;
+  pick.pdf = LG_PCELL * pCell + (1.0 - LG_PCELL) * globalLightPdf(li);
+  return pick;
+}
+
+fn sampleLightFace(shadePos : vec3<f32>) -> LightPoint {
+  var lp : LightPoint;
+  let pick = pickLightIndex(shadePos);
+  let li = pick.li;
+  let pdfSelect = pick.pdf;
   let l = lights[li];
   let v = vec3<f32>(f32(l.x & 0x1ffu), f32((l.x >> 9u) & 0x1ffu), f32((l.x >> 18u) & 0x1ffu));
   let face = (l.x >> 27u) & 7u;
@@ -70,21 +143,59 @@ fn sampleLightFace() -> LightPoint {
   return lp;
 }
 
-// Direct emissive light at a path vertex via one light-list sample
-// (full, non-demodulated contribution; used at secondary vertices).
-fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>) -> vec3<f32> {
+// Emissive-NEE RIS candidate budget at bounce k (primary hit = bounce 0).
+// Fixed at the historical 4 (primary) / 1 (secondary) split unless
+// RF_ADAPTCAND is set, in which case the primary-hit budget grows
+// logarithmically with the scene's light-face count (u.params2.y), scaled by
+// the ?candscale= knob (u.params5.y), and halves per bounce — the analog of
+// the paper's 32/2^k schedule (Lin 2026 §6.1/§7):
+//   N0 = clamp(round(candscale * 4 * (1 + log2(1 + lights/256))), 1, 16)
+//   Nk = max(1, N0 >> k)
+// N depends only on uniforms, so candidate loops stay uniform control flow.
+fn emissiveCandCount(bounce : u32) -> u32 {
+  if (!rflag(RF_ADAPTCAND)) { return select(1u, 4u, bounce == 0u); }
+  let n0 = clamp(round(u.params5.y * 4.0 * (1.0 + log2(1.0 + f32(u.params2.y) / 256.0))), 1.0, 16.0);
+  return max(u32(n0) >> min(bounce, 31u), 1u);
+}
+
+// Direct emissive light at a path vertex: RIS over nCand light-list samples
+// (full, non-demodulated contribution; used at secondary vertices). Target
+// p-hat = lum(f); each candidate carries v = f/pdfA and resampling weight
+// lum(f)/(M*pdfA) = lum(v)/M, so the estimator V(y)*v_y*wSum/lum(v_y) is
+// unbiased for any M; one shadow ray on the survivor only. At M = 1 this
+// reduces exactly (values and RNG stream) to the plain one-sample estimate.
+fn emissiveNEE(pos : vec3<f32>, n : vec3<f32>, albedo : vec3<f32>, nCand : u32) -> vec3<f32> {
   if (u.params2.y == 0u) { return vec3<f32>(0.0); }
-  let lp = sampleLightFace();
   let surf = pos + n * 1e-3;
-  let d = lp.pos - surf;
-  let r2 = max(dot(d, d), 1e-6);
-  let dir = d * inverseSqrt(r2);
-  let cos1 = dot(n, dir);
-  let cos2 = dot(lp.n, -dir);
-  if (cos1 <= 0.0 || cos2 <= 0.0) { return vec3<f32>(0.0); }
-  let r = sqrt(r2);
-  if (traceShadow(surf, dir, r - 2e-3)) { return vec3<f32>(0.0); }
-  return albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
+  let invM = 1.0 / f32(nCand);
+  var wSum = 0.0;
+  var sel = vec3<f32>(0.0);   // f/pdfA of the selected candidate
+  var selLum = 0.0;
+  var selDir = vec3<f32>(0.0);
+  var selR2 = 0.0;
+  for (var k = 0u; k < nCand; k++) {
+    let lp = sampleLightFace(pos);
+    let d = lp.pos - surf;
+    let r2 = max(dot(d, d), 1e-6);
+    let dir = d * inverseSqrt(r2);
+    let cos1 = dot(n, dir);
+    let cos2 = dot(lp.n, -dir);
+    if (cos1 <= 0.0 || cos2 <= 0.0) { continue; }
+    let v = albedo * INV_PI * cos1 * cos2 / r2 * lp.Le / lp.pdfA;
+    let w = lum(v) * invM;
+    if (w <= 0.0) { continue; }
+    let first = wSum == 0.0;
+    wSum += w;
+    // The first valid candidate wins with probability 1: skipping its rand()
+    // keeps the RNG stream identical to the pre-adaptive path when M = 1.
+    if (first || rand() * wSum < w) {
+      sel = v; selLum = lum(v); selDir = dir; selR2 = r2;
+    }
+  }
+  if (wSum <= 0.0) { return vec3<f32>(0.0); }
+  let r = sqrt(selR2);
+  if (traceShadow(surf, selDir, r - 2e-3)) { return vec3<f32>(0.0); }
+  return sel * (wSum / selLum);
 }
 
 // Outgoing radiance Lo(x2 -> x1) estimated by continuing the path from x2.
@@ -111,7 +222,7 @@ fn estimateLo(x2 : vec3<f32>, n2In : vec3<f32>, mat2 : Material, unified : bool)
       Lo += tp * mat.albedo * INV_PI * ndl * u.sunRadiance.rgb;
     }
     if (unified) {
-      Lo += tp * emissiveNEE(pos, n, mat.albedo);
+      Lo += tp * emissiveNEE(pos, n, mat.albedo, emissiveCandCount(v));
     }
     if (v == nBounces) { break; }
 
@@ -131,7 +242,7 @@ fn estimateLo(x2 : vec3<f32>, n2In : vec3<f32>, mat2 : Material, unified : bool)
     n = h.n;
     mat = unpackMaterial(h.mat);
   }
-  return min(Lo, vec3<f32>(FIREFLY_CLAMP));
+  return select(min(Lo, vec3<f32>(FIREFLY_CLAMP)), Lo, FIREFLY_CLAMP <= 0.0);
 }
 
 @compute @workgroup_size(8, 8)
@@ -212,7 +323,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       mat = unpackMaterial(h.mat);
     }
 
-    radiance = min(radiance, vec3<f32>(FIREFLY_CLAMP));
+    radiance = select(min(radiance, vec3<f32>(FIREFLY_CLAMP)), radiance, FIREFLY_CLAMP <= 0.0);
     let demod = radiance / max(mat1.albedo, vec3<f32>(1e-3));
     textureStore(radianceOut, pix, vec4<f32>(demod, 1.0));
     return;
@@ -254,22 +365,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
   }
 
-  // Candidate: light-list NEE at x1, RIS over 4 emissive faces (§6.1).
+  // Candidate: light-list NEE at x1, RIS over emissiveCandCount(0) emissive
+  // faces (§6.1) — 4 fixed, or the adaptive budget under RF_ADAPTCAND.
   if (unified && u.params2.y > 0u) {
+    let nCand = emissiveCandCount(0u);
     var eSum = 0.0;
     var eSel : Sample;
     eSel.kind = SK_NONE;
     var eSelP = 0.0;
     var eSelPdf = 1.0;
-    for (var k = 0u; k < 4u; k++) {
-      let lp = sampleLightFace();
+    for (var k = 0u; k < nCand; k++) {
+      let lp = sampleLightFace(x1);
       var s : Sample;
       s.kind = SK_POINT;
       s.pos = lp.pos;
       s.n = lp.n;
       s.rad = lp.Le;
       let p = evalTarget(s, x1, n1);
-      let w = p / (4.0 * lp.pdfA);
+      // 1/M term of the RIS weight uses the ACTUAL candidate count so the
+      // resampled estimator stays unbiased for any budget.
+      let w = p / (f32(nCand) * lp.pdfA);
       if (w > 0.0) {
         eSum += w;
         if (rand() * eSum < w) { eSel = s; eSelP = p; }
@@ -309,7 +424,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       s.kind = SK_POINT;
       s.pos = x2;
       s.n = h.n;
-      s.rad = min(Lo, vec3<f32>(FIREFLY_CLAMP));
+      s.rad = select(min(Lo, vec3<f32>(FIREFLY_CLAMP)), Lo, FIREFLY_CLAMP <= 0.0);
       let d = x2 - x1;
       let r2 = max(dot(d, d), 1e-6);
       let cos1 = max(dot(n1, normalize(d)), 1e-4);
@@ -329,9 +444,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (sel.kind != SK_NONE && selP > 0.0) {
     out = sel;
     out.W = wSum / selP;
-    out.c = 1.0;
-    out.seed = pcgHash(pixIdx + u.params0.x * (dims.x * dims.y + 1u));
   }
+  // A failed initial sample still carries confidence 1: it is a *zero-valued
+  // outcome* of the canonical technique, not a missing technique. Dropping it
+  // from the reuse MIS makes the reservoir chain converge to the conditional
+  // mean E[wSum | sample found] — a 1/(1-q) energy inflation (measured +165%
+  // in `gi`, where the sole bounce candidate lands on dark surfaces often).
+  out.c = 1.0;
+  out.seed = pcgHash(pixIdx + u.params0.x * (dims.x * dims.y + 1u));
   reservoirsA[pixIdx] = packReservoir(out);
   textureStore(directOut, pix, vec4<f32>(direct, 1.0));
 }

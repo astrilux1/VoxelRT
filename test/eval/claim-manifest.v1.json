@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "id": "voxelrt-lin2026-claim-v1",
+  "description": "Frozen machine parameters for claim-bearing VoxelRT versus Lin 2026 evaluation.",
+  "capture": {
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "renderScale": "1",
+    "operatingBounces": 6,
+    "denoise": "0",
+    "fireflyClamp": 0,
+    "hdrFormat": "rgb-f32le-linear",
+    "timing": {
+      "enabled": true,
+      "warmupFrames": 4,
+      "minimumRepeats": 5
+    }
+  },
+  "reference": {
+    "preset": "base",
+    "denoise": "0",
+    "maxHistory": 1000000,
+    "bounces": 12,
+    "seed": 0,
+    "targetFrames": 1600,
+    "convergence": {
+      "primaryFrames": [800, 1600],
+      "extensionFrame": 3200,
+      "maxChannelMeanRelativeDelta": 0.005,
+      "minHdrPsnrPeakDb": 30
+    }
+  },
+  "evaluation": {
+    "frameCheckpoints": [1, 2, 4, 8, 16, 32, 64, 96, 128],
+    "diagnosticSeedStride": 7717,
+    "qualitySeeds": {
+      "static": [
+        0,
+        7717,
+        15434,
+        23151,
+        30868,
+        38585,
+        46302,
+        54019,
+        61736,
+        69453,
+        77170,
+        84887,
+        92604,
+        100321,
+        108038,
+        115755
+      ],
+      "motion": [
+        0,
+        7717,
+        15434,
+        23151,
+        30868,
+        38585,
+        46302,
+        54019,
+        61736,
+        69453,
+        77170,
+        84887,
+        92604,
+        100321,
+        108038,
+        115755,
+        123472,
+        131189,
+        138906,
+        146623,
+        154340,
+        162057,
+        169774,
+        177491,
+        185208,
+        192925,
+        200642,
+        208359,
+        216076,
+        223793,
+        231510,
+        239227
+      ]
+    }
+  },
+  "scenarios": {
+    "interior_static": {
+      "pose": { "px": 8.8, "py": 4.7, "pz": 7.0, "yaw": -0.45, "pitch": 0.02 },
+      "referenceFrame": 1
+    },
+    "interior_move": {
+      "pose": { "px": 8.8, "py": 4.7, "pz": 7.0, "yaw": -0.45, "pitch": 0.02 },
+      "motion": { "axis": "x", "amplitude": 0.6, "angularStep": 0.07 },
+      "referenceFrame": 96
+    },
+    "exterior_static": {
+      "pose": { "px": 8.0, "py": 4.9, "pz": 4.6, "yaw": 0.85, "pitch": -0.10 },
+      "referenceFrame": 1
+    },
+    "exterior_move": {
+      "pose": { "px": 8.0, "py": 4.9, "pz": 4.6, "yaw": 0.85, "pitch": -0.10 },
+      "motion": { "axis": "x", "amplitude": 0.6, "angularStep": 0.07 },
+      "referenceFrame": 96
+    },
+    "lamps_static": {
+      "pose": { "px": 6.6, "py": 4.9, "pz": 6.9, "yaw": 0.55, "pitch": 0.0 },
+      "scene": "lamps",
+      "referenceFrame": 1
+    },
+    "lamps_move": {
+      "pose": { "px": 6.6, "py": 4.9, "pz": 6.9, "yaw": 0.55, "pitch": 0.0 },
+      "scene": "lamps",
+      "motion": { "axis": "x", "amplitude": 0.6, "angularStep": 0.07 },
+      "referenceFrame": 96
+    }
+  },
+  "configurations": {
+    "base": "preset=base&fclamp=0",
+    "gi": "preset=gi&fclamp=0",
+    "unified": "preset=gi&unified=1&fclamp=0",
+    "paired": "preset=gi&unified=1&paired=1&fclamp=0",
+    "footprint": "preset=gi&unified=1&paired=1&footprint=1&fclamp=0",
+    "dupmap": "preset=gi&unified=1&paired=1&footprint=1&dupmap=1&fclamp=0",
+    "vector": "preset=gi&unified=1&paired=1&footprint=1&dupmap=1&vector=1&fclamp=0",
+    "lin": "preset=lin&fclamp=0",
+    "ours_unbiased": "preset=ours&dupmap=0&rclamp=0&fclamp=0",
+    "ours": "preset=ours&fclamp=0",
+    "ours_no_lightpower": "preset=ours&lightpower=0&fclamp=0",
+    "ours_no_dup": "preset=ours&dupmap=0&fclamp=0",
+    "ours_adaptcand": "preset=ours&adaptcand=1&fclamp=0",
+    "ours_lightgrid": "preset=ours&lightgrid=1&fclamp=0",
+    "ours_adapt_lightgrid": "preset=ours&adaptcand=1&lightgrid=1&fclamp=0",
+    "ours_sigma24": "preset=ours&sigma=24&fclamp=0",
+    "ours_sigma32": "preset=ours&sigma=32&fclamp=0",
+    "ours_sigma48": "preset=ours&sigma=48&fclamp=0",
+    "ours_mixsigma24": "preset=ours&mixsigma=1&sigma2=24&fclamp=0",
+    "ours_mixsigma32": "preset=ours&mixsigma=1&sigma2=32&fclamp=0",
+    "ours_mixsigma48": "preset=ours&mixsigma=1&sigma2=48&fclamp=0",
+    "ours_mixsigma": "preset=ours&mixsigma=1&fclamp=0"
+  },
+  "runtime": {
+    "hostGpu": "NVIDIA GeForce RTX 3080",
+    "adapterVendor": "nvidia",
+    "adapterArchitecture": "ampere",
+    "requiredFeatures": ["float32-filterable", "timestamp-query"],
+    "accumulationFormat": "rgba32float",
+    "playwrightVersion": "1.61.1",
+    "chromiumVersion": "149.0.7827.55",
+    "flipEvaluatorVersion": "1.7",
+    "launchArgs": [
+      "--no-sandbox",
+      "--enable-unsafe-webgpu",
+      "--force_high_performance_gpu",
+      "--ignore-gpu-blocklist",
+      "--disable-software-rasterizer",
+      "--disable-gpu-vsync",
+      "--disable-frame-rate-limit",
+      "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows"
+    ]
+  },
+  "metrics": {
+    "headline": "HDR-FLIP",
+    "flipMode": "HDR",
+    "diagnostics": [
+      "hdrMse",
+      "hdrRmse",
+      "hdrPsnrPeak",
+      "meanAbsRelative",
+      "meanRgb"
+    ]
+  }
+}
