@@ -73,7 +73,9 @@ The project is complete when all of the following are true:
   with its own correctness gate and an evidence-boxed kill budget in the
   world-GI style (glossy: 2 materially different designs; glass: 3, given
   voxel-refraction risk). Failing all designs parks the stage with a named
-  blocker; it does not unpark silently.
+  blocker; it does not unpark silently. Stress-scene specs and the honest
+  voxel coverage caveats (no focusing caustics, no curvature term, slab-only
+  refraction): `docs/SCENES.md`.
 - Evidence is two-track: the diffuse-only results close as the **claim-v1
   milestone**; materials work opens **claim-manifest v2** with new references,
   new correctness rows, and re-opened verdicts for glossy-sensitive kills
