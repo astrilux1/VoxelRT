@@ -2,6 +2,28 @@
 
 ## 2026-07-01 campaign update (see docs/PLAN.md for the full plan)
 
+- **2026-07-18 Stakeholder interview: materials become core; paper is source
+  of truth.** Two interview rounds settled the project's direction. **(1)
+  Scope:** glossy, specular, and glass are core framework features, not
+  extensions — where the codebase diverges from Lin 2026's evaluation, the
+  codebase is deficient (the estimator currently *exploits* diffuse-only:
+  restir.wgsl's reconnection shift needs no replay and footprintOK is a
+  diffuse adaptation, so this is estimator-core work, not shading polish).
+  Rollout staged glossy→mirror→glass, GGX paper-standard, each stage
+  pre-registered with evidence-boxed kill budgets (glossy 2 designs, glass 3).
+  **(2) Evidence:** two-track — the running diffuse baseline campaign closes
+  claim-v1 as a milestone record; materials open claim-manifest v2 with new
+  references and re-opened glossy-sensitive verdicts (world-GI kill,
+  footprint rows). **(3) Deliverable:** publishable-grade claim; the
+  2-3x-vs-lin target stands. **(4) Process:** living results doc started
+  (docs/RESULTS.md); GPU campaigns may run without per-run approval but with
+  alerts; hardware-counter profiling is to become a core workflow piece like
+  the paper's NSight usage — research in flight for the Chrome/Dawn/D3D12
+  toolchain (NSight Graphics vs PIX, CLI automation), with profiled runs kept
+  separate from timing runs. Scene research (paper-analog glossy/glass stress
+  scenes buildable from voxels) also in flight. PLAN §3 scope rewritten
+  accordingly; BIASMAP.md pre-registered earlier today runs against v1 first.
+
 - **2026-07-18 Process hardening (no research results in this change).**
   Implemented the process recommendations that came out of the post-world-GI
   review; no estimator, shader logic, or evidence changed. **(1)** New non-GPU

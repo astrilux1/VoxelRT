@@ -106,6 +106,11 @@ const framesDefault = parseInt(arg('--frames', correctnessMode
 const repeats = parseInt(arg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
 const wantFlip = claimMode || flag('--flip') || suite === 'paper';
 const forceRefs = flag('--force-refs');
+// --validate-refs only checks each scenario at its own referenceFrame. A moving
+// scenario is evaluated at a *different pose* for every frame checkpoint, so
+// each checkpoint has its own reference and none of them are convergence-tested
+// by default. This extends the sweep to every evaluation checkpoint.
+const validateRefCheckpoints = flag('--validate-ref-checkpoints');
 const refsOnly = flag('--refs');
 const allowSoftwareGpu = flag('--allow-software-gpu');
 const allowNonNvidiaGpu = flag('--allow-non-nvidia-gpu');
@@ -709,7 +714,12 @@ async function validateReferenceSet() {
   for (const name of scenarioNames) {
     const scen = SCENARIOS[name];
     if (!scen) throw new Error(`unknown scenario ${name}`);
-    const evaluationFrame = scen.referenceFrame;
+    // Static scenarios hold one pose, so every checkpoint resolves to the same
+    // reference; only moving scenarios have a per-checkpoint reference to test.
+    const evaluationFrames = (validateRefCheckpoints && scen.move)
+      ? manifest.evaluation.frameCheckpoints
+      : [scen.referenceFrame];
+    for (const evaluationFrame of evaluationFrames) {
     const low = await reference(name, scen, lowFrames, evaluationFrame);
     const high = await reference(name, scen, highFrames, evaluationFrame);
     const primaryMetrics = await score(low.f32, high.f32, view.width, view.height);
@@ -735,7 +745,9 @@ async function validateReferenceSet() {
     }
     rows.push(row);
     const pct = (primary.maxChannelMeanRelativeDelta * 100).toFixed(3);
-    console.log(`reference ${name}: ${row.status} | max mean delta ${pct}% | HDR PSNR ${primary.hdrPsnrPeakDb.toFixed(2)} dB`);
+    const at = scen.move ? ` at${evaluationFrame}f` : '';
+    console.log(`reference ${name}${at}: ${row.status} | max mean delta ${pct}% | HDR PSNR ${primary.hdrPsnrPeakDb.toFixed(2)} dB`);
+    }
   }
   const report = {
     claimManifest: manifestIdentity,

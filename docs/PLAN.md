@@ -63,18 +63,36 @@ The project is complete when all of the following are true:
 
 ### In scope
 
-- Diffuse voxel scenes in the existing 256^3 world at 1/16 m voxel scale.
+- Voxel scenes in the existing 256^3 world at 1/16 m voxel scale.
+- **Materials (stakeholder decision 2026-07-18, supersedes the earlier
+  diffuse-only scope): glossy, specular, and glass are core.** The paper's
+  evaluation is the source of truth; where the codebase diverges from it, the
+  codebase is deficient. Rollout is staged — (1) GGX rough conductors
+  (paper-standard Trowbridge-Reitz/Smith, VNDF sampling), (2) smooth specular
+  mirrors, (3) dielectric glass with refraction — each stage pre-registered
+  with its own correctness gate and an evidence-boxed kill budget in the
+  world-GI style (glossy: 2 materially different designs; glass: 3, given
+  voxel-refraction risk). Failing all designs parks the stage with a named
+  blocker; it does not unpark silently.
+- Evidence is two-track: the diffuse-only results close as the **claim-v1
+  milestone**; materials work opens **claim-manifest v2** with new references,
+  new correctness rows, and re-opened verdicts for glossy-sensitive kills
+  (world-GI, footprint) that were reached under diffuse assumptions.
 - WebGPU/WGSL as the primary implementation and portability boundary.
 - One-sample-per-pixel path tracing with temporal and spatial reservoir reuse.
 - Static geometry plus deterministic camera motion for the claim campaign.
 - Voxel-native sampling, visibility, cache, compression, and scheduling work.
 - Algorithm-only evaluation first; denoised/presented quality as a separate
   secondary axis.
+- Hardware-counter profiling as a core workflow piece (paper §7.1 NSight
+  parity), pending toolchain selection; profiled runs stay separate from
+  timing runs so profiler overhead never contaminates claim timings.
+- A living results document (`docs/RESULTS.md`): every campaign lands with
+  its commands, manifest hashes, and failure cases when it happens.
 
 ### Out of scope until the primary claim is resolved
 
 - Porting the renderer to Falcor for an absolute-time comparison.
-- Glossy/specular material support solely to mirror hybrid shift mapping.
 - Dynamic brick transforms, voxel physics, and general scene streaming.
 - A native CUDA/DXR backend or Tensor Core path. Matrix hardware is relevant
   only if a later neural-cache or reconstruction workload is dense enough to
@@ -483,7 +501,14 @@ These are the next actions, in order:
    15/15 correctness rows, and retain cCap=20 only in the faithful real-time
    baseline.
 6. [ ] Run the locked `base`/`gi`/`lin`/`ours_unbiased`/`ours` baseline campaign.
-   One command on the benchmark machine: `npm run bench:baseline`.
+   One command on the benchmark machine: `npm run bench:baseline`. Then
+   `npm run analyze` for the equal-time curves and matched-FLIP speedup
+   ratios (the claim's decisive artifact, Lin 2026 Fig. 15b shape), and
+   `npm run bench:references:checkpoints` to convergence-test the per-
+   checkpoint motion references the campaign builds.
+6b. [ ] Run the pre-registered seed-averaged bias maps (`docs/BIASMAP.md`,
+   ~16 min GPU): verifies `ours_unbiased` per-pixel and bounds the default
+   preset's structured bias before any claim wording is chosen.
 7. [ ] Promote or kill `sigma=32`, `adaptcand+lightgrid`, `confdenoise`, and
    `mutate` using the Phase 3 ladder. Rung-2 direction checks are one command
    on the benchmark machine: `npm run bench:ladder` (sampling axis, includes

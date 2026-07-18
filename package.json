@@ -14,7 +14,10 @@
     "bench:ladder:confdenoise": "node test/bench.mjs --resolution 1920x1080 --scale 1 --flip --frames 32 --repeats 3 --ref-frames 64 --denoise 1 --scenarios interior_move,exterior_move,lamps_move --configs ours,ours_confdenoise",
     "bench:preflight": "node test/bench.mjs --claim-preflight",
     "bench:references": "node test/bench.mjs --claim --validate-refs",
+    "bench:references:checkpoints": "node test/bench.mjs --validate-refs --validate-ref-checkpoints --resolution 1920x1080 --scale 1",
     "bench:correctness": "node test/bench.mjs --claim --suite correctness",
+    "analyze": "node test/analyze.mjs",
+    "analyze:cost": "node test/analyze.mjs --cost-table",
     "bench:ablation": "node test/bench.mjs --suite ablation --resolution 1920x1080 --scale 1 --flip",
     "bench:convergence": "node test/bench.mjs --suite convergence --resolution 1920x1080 --scale 1 --flip"
   },
