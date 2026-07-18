@@ -6,11 +6,15 @@
   "scripts": {
     "start": "npx http-server -p 8080 -c-1 .",
     "test": "node test/screenshot.mjs",
+    "test:manifest": "node --test test/claim-manifest.test.mjs",
     "bench": "node test/bench.mjs --suite smoke",
+    "bench:preflight": "node test/bench.mjs --claim-preflight",
+    "bench:references": "node test/bench.mjs --claim --validate-refs",
+    "bench:correctness": "node test/bench.mjs --claim --suite correctness",
     "bench:ablation": "node test/bench.mjs --suite ablation --resolution 1920x1080 --scale 1 --flip",
     "bench:convergence": "node test/bench.mjs --suite convergence --resolution 1920x1080 --scale 1 --flip"
   },
   "devDependencies": {
-    "playwright": "^1.49.0"
+    "playwright": "1.61.1"
   }
 }

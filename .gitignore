@@ -1,4 +1,10 @@
 node_modules/
+__pycache__/
+.claude/
 test/screenshot.png
-test/eval/
+test/eval/*
+!test/eval/claim-manifest.v1.json
+!test/eval/correctness-manifest.v1.json
+!test/eval/estimator-correctness.v1.json
+!test/eval/reference-convergence.v1.json
 package-lock.json

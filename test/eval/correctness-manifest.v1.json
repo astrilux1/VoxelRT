@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "voxelrt-estimator-correctness-v1",
+  "description": "Permanent unbiased convergence gate against frozen claim references. Reuse rows disable ReSTIR temporal reuse, following Lin 2026's unbiased-accumulation recommendation while retaining fresh plus spatial reuse.",
+  "claimManifest": {
+    "id": "voxelrt-lin2026-claim-v1",
+    "schemaVersion": 1,
+    "sha256": "e734c1030fd10dbe0ebca705c2bf9f8a601a80906b73cc92d8faa466360ea736"
+  },
+  "capture": {
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "bounces": 8,
+    "frames": 800,
+    "denoise": "0",
+    "maxHistory": 1000000,
+    "seeds": [0]
+  },
+  "reference": {
+    "frames": 1600,
+    "bounces": 12
+  },
+  "scenarios": [
+    "interior_static",
+    "exterior_static",
+    "lamps_static"
+  ],
+  "configurations": {
+    "base": "preset=base&maxhist=1000000&fclamp=0",
+    "gi": "preset=gi&treuse=0&maxhist=1000000&fclamp=0",
+    "unified": "preset=gi&unified=1&treuse=0&maxhist=1000000&fclamp=0",
+    "lin_unbiased": "preset=lin&treuse=0&dupmap=0&footprint=0&maxhist=1000000&fclamp=0",
+    "ours_unbiased": "preset=ours&treuse=0&dupmap=0&rclamp=0&footprint=0&maxhist=1000000&fclamp=0"
+  },
+  "thresholds": {
+    "maxChannelMeanRelativeDelta": 0.01,
+    "minHdrPsnrPeakDb": 30
+  }
+}

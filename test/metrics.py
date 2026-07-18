@@ -31,13 +31,22 @@ def main():
     peak = float(max(np.max(ref), np.max(test), 1e-6))
     psnr = float(10.0 * math.log10((peak * peak) / max(mse, 1e-20)))
     rel_abs = float(np.mean(np.abs(diff) / np.maximum(np.abs(ref), 1e-3)))
+    ref_mean = np.mean(ref, axis=(0, 1))
+    test_mean = np.mean(test, axis=(0, 1))
+    mean_delta = np.abs(test_mean - ref_mean) / np.maximum(np.abs(ref_mean), 1e-6)
+    ref_rms = float(np.sqrt(np.mean(ref * ref)))
 
     out = {
         "hdrMse": mse,
         "hdrRmse": rmse,
         "hdrPsnrPeak": psnr,
         "hdrPeak": peak,
+        "hdrRelativeRmse": float(rmse / max(ref_rms, 1e-6)),
         "meanAbsRelative": rel_abs,
+        "referenceMeanRgb": [float(v) for v in ref_mean],
+        "testMeanRgb": [float(v) for v in test_mean],
+        "channelMeanRelativeDelta": [float(v) for v in mean_delta],
+        "maxChannelMeanRelativeDelta": float(np.max(mean_delta)),
         "flip": None,
         "flipAvailable": False,
     }
