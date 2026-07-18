@@ -21,6 +21,11 @@
 // and the post-reuse reservoir that becomes next frame's temporal history.
 // With RF_CONFDENOISE the radiance alpha carries the estimator-quality
 // signal q (see qualitySignal below); otherwise it stays a constant 1.0.
+// RF_HISTISOLATE is an experimental correlation-control path: spatial reuse
+// still contributes to the current estimate, but the pre-spatial canonical
+// reservoir is retained as next-frame history. This prevents spatially copied
+// lineages from recursively feeding the temporal-plus-spatial chain without
+// adding a buffer, a ray, or a hot-loop branch.
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(3) var radianceOut : texture_storage_2d<rgba16float, write>;
@@ -33,6 +38,9 @@
 @group(0) @binding(12) var dupTex : texture_2d<f32>;
 // Concatenated pairing textures (2 x i16 coordinate deltas per texel).
 @group(0) @binding(13) var<storage, read> pairing : array<u32>;
+// World-space GI reuse cache (RF_WORLDGI): seeded here with the shaded
+// reservoir, queried next frame by pathtrace (docs/WORLDGI.md §4B).
+@group(0) @binding(15) var<storage, read_write> worldGi : array<Reservoir>;
 
 // RF_CONFDENOISE: per-pixel estimator-quality signal q in [0,1], carried in
 // the radiance alpha channel (which is otherwise a constant 1.0 that nothing
@@ -211,14 +219,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       if (!ok) { continue; }
 
       let rq = unpackReservoir(reservoirsA[u32(q.y) * dims.x + u32(q.x)]);
-      // The validated neighbor is a domain regardless of what its reservoir
-      // holds; it contributes a candidate only if the sample exists and its
-      // reconnection passes the footprint criterion.
+      // A null reservoir is a zero-valued outcome of an applicable domain and
+      // must stay in the MIS normalization. A non-null sample whose only
+      // reconnection fails the footprint criterion is different: Lin 2026's
+      // hybrid shift would continue replay to a later reconnection vertex.
+      // This voxel specialization has no replay fallback, so that neighbor
+      // technique is inapplicable for this draw. Counting it as a null domain
+      // dilutes every surviving estimator and creates systematic darkening.
+      let reconnectable = rq.kind == SK_NONE || !rflag(RF_FOOTPRINT) ||
+        footprintOK(rq, x1, n1, tPrim, cosView);
+      if (!reconnectable) { continue; }
       domX1[nDom] = x1q;
       domN1[nDom] = gq.xyz;
       domC[nDom] = rq.c;
-      if (rq.kind != SK_NONE &&
-          (!rflag(RF_FOOTPRINT) || footprintOK(rq, x1, n1, tPrim, cosView))) {
+      if (rq.kind != SK_NONE) {
         cand[nCand] = rq;
         candDom[nCand] = nDom;
         nCand++;
@@ -238,7 +252,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var nullOut : Sample;
     nullOut.kind = SK_NONE;
     nullOut.c = min(cTotal, 255.0);
-    reservoirsB[pixIdx] = packReservoir(nullOut);
+    if (rflag(RF_HISTISOLATE)) {
+      reservoirsB[pixIdx] = reservoirsA[pixIdx];
+    } else {
+      reservoirsB[pixIdx] = packReservoir(nullOut);
+    }
     return;
   }
 
@@ -293,7 +311,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var nullOut : Sample;
     nullOut.kind = SK_NONE;
     nullOut.c = min(cTotal, 255.0);
-    reservoirsB[pixIdx] = packReservoir(nullOut);
+    if (rflag(RF_HISTISOLATE)) {
+      reservoirsB[pixIdx] = reservoirsA[pixIdx];
+    } else {
+      reservoirsB[pixIdx] = packReservoir(nullOut);
+    }
     return;
   }
 
@@ -314,5 +336,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   var qual = 1.0;
   if (rflag(RF_CONFDENOISE)) { qual = qualitySignal(sel.c, pix); }
   textureStore(radianceOut, pix, vec4<f32>(direct + contrib, qual));
-  reservoirsB[pixIdx] = packReservoir(sel);
+  let outRes = packReservoir(sel);
+  if (rflag(RF_HISTISOLATE)) {
+    reservoirsB[pixIdx] = reservoirsA[pixIdx];
+  } else {
+    reservoirsB[pixIdx] = outRes;
+  }
+
+  // Seed the world-space GI cache with this shaded reservoir (RF_WORLDGI,
+  // docs/WORLDGI.md §4B). Last-writer-wins across the pixels of a cell; only
+  // non-null samples are written so a pixel that failed this frame cannot
+  // erase a good cached sample — that persistence through disocclusion is the
+  // cache's whole purpose. The two null early-returns above do not seed.
+  if (rflag(RF_WORLDGI) && sel.kind != SK_NONE) {
+    worldGi[worldCellIndex(x1, n1)] = outRes;
+  }
 }

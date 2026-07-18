@@ -35,20 +35,30 @@ const RF = {
   restir: 1, treuse: 2, sreuse: 4, paired: 8, dupmap: 16, footprint: 32,
   vector: 64, unified: 128, plane: 256, rescue: 512, fullv: 1024, rclamp: 2048,
   lightpower: 4096, mixsigma: 8192, adaptcand: 16384, confdenoise: 32768,
-  lightgrid: 65536, mutate: 131072,
+  lightgrid: 65536, mutate: 131072, histisolate: 262144, worldgi: 524288,
 };
 const PRESETS = {
   // Plain 1-spp path tracer + temporal accumulation + à-trous (pre-ReSTIR).
   base: [],
   // ReSTIR GI-style: reservoirs for indirect only, random-disk spatial reuse.
   gi: ['restir', 'treuse', 'sreuse'],
-  // Faithful adaptation of the Lin 2026 technique set.
-  lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+  // Applicable Lin 2026 technique set. The Section 4 footprint criterion is
+  // not default-on: it selects a later hybrid-shift replay vertex, but this
+  // Lambertian x2-only specialization has no replay fallback. Its flag stays
+  // available as a negative ablation until such a fallback exists.
+  lin: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
         'vector', 'unified'],
   // Ours: Lin 2026 + voxel-exact plane reuse, disocclusion rescue,
   // per-candidate visibility, reservoir contribution clamp, light power sampling.
-  ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap', 'footprint',
+  ours: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
          'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp', 'lightpower'],
+  // Motion-specialized ours: spatial reuse still shades the current frame,
+  // but only the pre-spatial temporal lineage becomes next-frame history.
+  // This avoids recursive spatial sample propagation under camera motion;
+  // keep it explicit because short static sequences prefer the base preset.
+  ours_motion: ['restir', 'treuse', 'sreuse', 'paired', 'dupmap',
+                'vector', 'unified', 'plane', 'rescue', 'fullv', 'rclamp',
+                'lightpower', 'histisolate'],
 };
 const preset = params.get('preset') || 'ours';
 let restirFlags = (PRESETS[preset] || PRESETS.ours)
@@ -75,6 +85,7 @@ const tuning = {
   confk: parseFloat(params.get('confk') || '1'),         // confdenoise: strength
   mutscale: parseFloat(params.get('mutscale') || '0.5'), // mutate: proposal scale
   gridcand: parseFloat(params.get('gridcand') || '8'),   // lightgrid: cell candidates
+  wgicap: parseFloat(params.get('wgicap') || '0'),       // worldgi: cache confidence cap
 };
 // Deterministic camera strafe for benchmarking temporal behavior, and an
 // exact frame count to halt at so captures land on a reproducible pose.
@@ -150,6 +161,7 @@ async function init() {
     vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
     device: adapter.info?.device, description: adapter.info?.description,
     isFallbackAdapter: adapter.isFallbackAdapter,
+    accumulationFormat: accumFormat,
     features: Array.from(adapter.features || []),
     limits: adapterLimits(adapter.limits),
   };
@@ -193,6 +205,22 @@ async function init() {
   const uniformBuf = device.createBuffer({
     label: 'uniforms', size: 304,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // World-space GI reuse cache (RF_WORLDGI, docs/WORLDGI.md): one persistent
+  // 32-byte reservoir per (brick, face) cell, resolution-independent, created
+  // once. WebGPU zero-inits it, and a zero reservoir decodes as SK_NONE/c=0 —
+  // an empty (inert) cache. Not ping-ponged: persistence across frames is the
+  // point. (256/8)³ × 6 faces × 32 B ≈ 6.29 MB.
+  // Full cache is 6 faces × 8 sub-brick voxel layers × brick grid (~50 MB).
+  // worldgi is a killed-with-evidence experiment (docs/WORLDGI.md §7.4), so only
+  // pay for it when the flag is actually set; otherwise bind a stub (the shader
+  // never indexes it with the flag off).
+  const bgrid = GRID / BRICK;
+  const worldGiBuf = device.createBuffer({
+    label: 'worldGi',
+    size: (restirFlags & RF.worldgi) ? bgrid * bgrid * bgrid * 6 * 8 * 32 : 32,
+    usage: GPUBufferUsage.STORAGE,
   });
 
   // Emissive-face light list (unified DI+GI candidates).
@@ -341,6 +369,15 @@ async function init() {
   if (params.has('yaw')) spawn.yaw = parseFloat(params.get('yaw'));
   if (params.has('pitch')) spawn.pitch = parseFloat(params.get('pitch'));
   const camera = new Camera(canvas, spawn);
+  // Bench hook: set the camera pose mid-run (used by the world-GI camera-return
+  // test to warm the cache, look away, and return). update() only moves on
+  // keypresses, so a pose set here persists.
+  status.setPose = (p) => {
+    camera.pos = [p.px, p.py, p.pz];
+    camera.yaw = p.yaw;
+    camera.pitch = p.pitch;
+    camera.moved = true;
+  };
   const uniformData = new ArrayBuffer(304);
   const f32 = new Float32Array(uniformData);
   const u32 = new Uint32Array(uniformData);
@@ -382,7 +419,7 @@ async function init() {
     f32.set([tuning.ccap, tuning.capmin, tuning.dupalpha, tuning.fpc], 60);
     f32.set([tuning.radius, tuning.maxhist, tuning.clamp, 0], 64);
     f32.set([tuning.sigma2, tuning.candscale, tuning.confk, tuning.mutscale], 68);
-    f32.set([tuning.gridcand, 0, 0, 0], 72);
+    f32.set([tuning.gridcand, tuning.wgicap, 0, 0], 72);
     device.queue.writeBuffer(uniformBuf, 0, uniformData);
     prevViewProj = viewProj;
     prevCamPos = [...camera.pos];
@@ -422,6 +459,7 @@ async function init() {
         { binding: 9, resource: { buffer: reservoirBufB } },
         { binding: 10, resource: { buffer: brickMaskBuf } },
         { binding: 12, resource: tex.dup },
+        { binding: 15, resource: { buffer: worldGiBuf } },
       ],
     });
     const sp = device.createBindGroup({
@@ -438,6 +476,7 @@ async function init() {
         { binding: 10, resource: { buffer: brickMaskBuf } },
         { binding: 12, resource: tex.dup },   // prev-frame dup score (confdenoise q)
         { binding: 13, resource: { buffer: pairingBuf } },
+        { binding: 15, resource: { buffer: worldGiBuf } },
       ],
     });
     const dup = device.createBindGroup({

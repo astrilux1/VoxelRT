@@ -29,7 +29,9 @@ struct Uniforms {
                               // z = confidence-denoise strength, w = mutation scale
   params6      : vec4<f32>,   // x = light-grid candidates per cell (?gridcand=;
                               // currently unused — RF_LIGHTGRID samples the full
-                              // fixed K=16 per-cell table), yzw = reserved
+                              // fixed K=16 per-cell table),
+                              // y = world-GI cache confidence cap (?wgicap=; 0 =
+                              // uncapped), zw = reserved
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -53,6 +55,8 @@ const RF_ADAPTCAND : u32 = 16384u; // ours: adaptive RIS candidate budgets (para
 const RF_CONFDENOISE:u32 = 32768u; // ours: reservoir-confidence-driven denoise (params5.z)
 const RF_LIGHTGRID : u32 = 65536u; // ours: per-brick light grid, ReGIR-style (params6.x)
 const RF_MUTATE    : u32 = 131072u;// ours: intra-face MCMC mutation decorrelation (params5.w)
+const RF_HISTISOLATE:u32 = 262144u;// ours: keep pre-spatial temporal lineage as history
+const RF_WORLDGI   : u32 = 524288u;// ours: brick/face-keyed world-space GI reuse cache
 
 fn rflag(bit : u32) -> bool { return (u.params2.x & bit) != 0u; }
 

@@ -31,6 +31,9 @@
 @group(0) @binding(7) var<storage, read_write> reservoirsA : array<Reservoir>;
 @group(0) @binding(9) var<storage, read> reservoirsB : array<Reservoir>;
 @group(0) @binding(12) var dupTex  : texture_2d<f32>;
+// World-space GI reuse cache (RF_WORLDGI): consulted only on disocclusion,
+// where screen-space temporal history is absent (docs/WORLDGI.md).
+@group(0) @binding(15) var<storage, read> worldGi : array<Reservoir>;
 
 fn validPrev(prevPix : vec2<i32>, dims : vec2<i32>, worldPos : vec3<f32>, n1 : vec3<f32>) -> bool {
   if (any(prevPix < vec2<i32>(0)) || any(prevPix >= dims)) { return false; }
@@ -173,7 +176,42 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
     }
   }
-  if (!found) { return; }
+  if (!found) {
+    // Disocclusion: no screen-space history to merge. This is exactly where a
+    // persistent world-space GI reservoir should help — the surface may be
+    // freshly exposed on screen but was seen before and still lives in its
+    // brick/face cell. Merge that cached sample into the fresh initial
+    // reservoir (confidence-capped GRIS, same math as the history merge). The
+    // cache is confined to this branch so it never blurs the well-converged
+    // bulk: applied everywhere it produces piecewise-constant, brick-blocky GI
+    // (measured; see docs/WORLDGI.md §7.4). Applied only where the alternative
+    // is a lone 1-spp sample, a low-noise cached estimate is a net win.
+    if (rflag(RF_WORLDGI)) {
+      let wc = unpackReservoir(worldGi[worldCellIndex(x1, n1)]);
+      if (wc.kind != SK_NONE) {
+        let sc = unpackReservoir(reservoirsA[pixIdx]);
+        let cF = sc.c;
+        let cW = select(wc.c, min(wc.c, u.params6.y), u.params6.y > 0.0);
+        let pF = evalTarget(sc, x1, n1);
+        let pW = evalTarget(wc, x1, n1);
+        let mDen = max(cF + cW, 1e-3);
+        let wF = (cF / mDen) * pF * max(sc.W, 0.0);
+        let wW = (cW / mDen) * pW * max(wc.W, 0.0);
+        let wTot = wF + wW;
+        if (wTot > 0.0) {
+          var merged = sc;
+          var mP = pF;
+          if (rand() * wTot >= wF) { merged = wc; mP = pW; }
+          if (mP > 0.0) {
+            merged.W = wTot / mP;
+            merged.c = cF + cW;
+            reservoirsA[pixIdx] = packReservoir(merged);
+          }
+        }
+      }
+    }
+    return;
+  }
 
   let prevIdx = u32(prevPix.y) * dims.x + u32(prevPix.x);
   // A null history still participates in the merge (with pT = 0): both the

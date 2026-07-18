@@ -91,6 +91,32 @@ fn lum(c : vec3<f32>) -> f32 {
   return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// World-space GI cache key (RF_WORLDGI, see docs/WORLDGI.md). A receiver is
+// bucketed by its brick coordinate plus a 6-way face orientation, giving a
+// stable world cell that survives disocclusion and camera return. Opposite
+// faces of a brick never share a slot (their cosine/visibility differ).
+fn faceBucket(n : vec3<f32>) -> u32 {
+  let a = abs(n);
+  if (a.x >= a.y && a.x >= a.z) { return select(1u, 0u, n.x >= 0.0); }
+  if (a.y >= a.z)               { return select(3u, 2u, n.y >= 0.0); }
+  return select(5u, 4u, n.z >= 0.0);
+}
+
+// Plane-exact cell key: brick (tangential 0.5 m) × 6 faces × the 8 voxel layers
+// within the brick along the face normal. Two receivers share a cell only when
+// they are on the same voxel plane (same normal, same plane coordinate to
+// within a brick) and within 0.5 m tangentially — the world-space analog of the
+// screen-space RF_PLANE same-plane reuse condition. 8 sub-planes → 8× cells.
+fn worldCellIndex(x1 : vec3<f32>, n1 : vec3<f32>) -> u32 {
+  let fb = faceBucket(n1);
+  let axis = fb >> 1u;
+  let vc = vec3<i32>(floor(x1 * INV_VOXEL));               // voxel coordinate
+  let bc = clamp(vc / BRICK, vec3<i32>(0), vec3<i32>(BGRID - 1));
+  let bi = u32(bc.x + bc.y * BGRID + bc.z * BGRID * BGRID);
+  let sub = u32(vc[axis] - bc[axis] * BRICK) & 7u;          // layer in brick
+  return (bi * 6u + fb) * 8u + sub;
+}
+
 // Voxel-exact receiver reconstruction. The G-buffer depth is measured along
 // the *jittered* primary ray, so `centerRay * t` lands off the true surface
 // at geometry edges and wobbles frame to frame — which false-fires
