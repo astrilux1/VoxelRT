@@ -125,6 +125,24 @@ Caveats carried: dense-256³ coherent rays favor the brickmap ~33% (claim
 scoped to sparse/large worlds); the <50 ms build gate is unadjudicated
 until generation is staged out of the build passes.
 
+### Traversal kernel optimization log (chasing the GRay/s ceiling)
+
+Stakeholder expectation to test: "30–80 GRay/s at least" on the 3080.
+Current measured (sparse1024/fixture256, stackless S64): primary 2.9/4.1,
+bounce 0.78/1.1, shadow 2.8/6.6 GRay/s. Literature target-band research in
+flight. Measured levers so far (all gate-verified unchanged results):
+
+1. **Workgroup size** (`--wg`): 8×16 beats the 8×8 default by +4–7% on all
+   classes (64-thread CTAs cap Ampere occupancy at 67% via the 16-CTA/SM
+   limit); ≥256-thread groups regress — registers become the cap. Small
+   real win, adopted for future runs; not the missing multiplier.
+2. **Hit compaction + indirect dispatch** (`--compact`): **negative
+   result.** Bounce unchanged (dead sky threads were exiting cheaply;
+   surviving-ray divergence dominates), shadow −16% (atomic-append order
+   destroys the spatial coherence 2D dispatch gave the coherent sun rays).
+   Classic compaction-without-sorting outcome; kept behind the flag as the
+   baseline for a future *sorted* compaction experiment.
+
 ### Materials rollout
 
 Opens with the glossy stage's pre-registration. Staged: GGX rough

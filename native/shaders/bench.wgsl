@@ -29,6 +29,13 @@ struct BenchParams {
 @group(0) @binding(2) var<storage, read_write> hitT : array<f32>;
 @group(0) @binding(3) var<storage, read_write> hitNMat : array<vec4<u32>>; // x = face-normal code (pack_normal), y = packed material, zw unused
 @group(0) @binding(4) var<storage, read_write> stats : array<atomic<u32>>; // [0]=primary hits, [1]=bounce hits, [2]=shadow occluded
+// Hit compaction (--compact): primary appends hit pixel indices here, so the
+// bounce/shadow passes dispatch only over actual hits (~45% of pixels in
+// sparse1024) instead of dragging dead threads through every warp.
+// [0] = count, [1..] = pixel indices. `indirect` = dispatch args for the
+// compacted 1D passes, written by `prep` at the end of the primary pass.
+@group(0) @binding(5) var<storage, read_write> compactHits : array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> indirectArgs : array<u32>; // [x, 1, 1]
 
 fn pcg(v : u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
@@ -98,6 +105,51 @@ fn primary(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
   hitNMat[idx] = packed;
   imageOut[idx] = pack_rgba8(color);
+  if (h.t >= 0.0) {
+    let slot = atomicAdd(&compactHits[0], 1u);
+    atomicStore(&compactHits[1u + slot], idx);
+  }
+}
+
+// One-thread epilogue of the primary pass: turn the hit count into indirect
+// dispatch args for the compacted 1D passes (WGSIZE threads per group; the
+// host substitutes the same value it compiled the 1D entry points with).
+@compute @workgroup_size(1)
+fn prep(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let n = atomicLoad(&compactHits[0]);
+  indirectArgs[0] = (n + COMPACT_WG - 1u) / COMPACT_WG;
+  indirectArgs[1] = 1u;
+  indirectArgs[2] = 1u;
+}
+const COMPACT_WG : u32 = 128u;
+
+@compute @workgroup_size(128)
+fn bounce_compact(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let n = atomicLoad(&compactHits[0]);
+  if (gid.x >= n) { return; }
+  let idx = atomicLoad(&compactHits[1u + gid.x]);
+  let pix = vec2<u32>(idx % bp.width, idx / bp.width);
+  let t = hitT[idx];
+  let rdPrim = camera_ray(pix);
+  let n1 = unpack_normal(hitNMat[idx].x);
+  let pos = bp.eye.xyz + rdPrim * t + n1 * 1e-3;
+  let rd = cosine_hemisphere(n1, rand2(idx, bp.frame, 17u));
+  let h = trace(pos, rd, 1e4);
+  if (h.t >= 0.0) { atomicAdd(&stats[1], 1u); }
+}
+
+@compute @workgroup_size(128)
+fn shadow_compact(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let n = atomicLoad(&compactHits[0]);
+  if (gid.x >= n) { return; }
+  let idx = atomicLoad(&compactHits[1u + gid.x]);
+  let pix = vec2<u32>(idx % bp.width, idx / bp.width);
+  let t = hitT[idx];
+  let rdPrim = camera_ray(pix);
+  let n1 = unpack_normal(hitNMat[idx].x);
+  let pos = bp.eye.xyz + rdPrim * t + n1 * 1e-3;
+  let h = trace(pos, bp.sunDir.xyz, 1e4);
+  if (h.t >= 0.0) { atomicAdd(&stats[2], 1u); }
 }
 
 fn cosine_hemisphere(n : vec3<f32>, r : vec2<f32>) -> vec3<f32> {

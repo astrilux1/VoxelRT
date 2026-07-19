@@ -33,6 +33,13 @@ struct Args {
     png: Option<String>,
     gate: bool,
     verify_build: bool,
+    /// Bench workgroup size (--wg WxH), default 8x8. Occupancy knob only:
+    /// per-pixel math is size-independent, so images are unchanged.
+    wg: (u32, u32),
+    /// --compact: bounce/shadow dispatch only over compacted primary hits
+    /// (indirect dispatch) instead of all pixels. Same rays, same RNG (seeded
+    /// by pixel index), so results are unchanged; only warp packing differs.
+    compact: bool,
 }
 
 fn parse_args() -> Args {
@@ -48,6 +55,8 @@ fn parse_args() -> Args {
         png: Some("native-bench.png".into()),
         gate: false,
         verify_build: false,
+        wg: (8, 8),
+        compact: false,
     };
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -64,6 +73,11 @@ fn parse_args() -> Args {
         }
         if k == "--verify-build" {
             a.verify_build = true;
+            i += 1;
+            continue;
+        }
+        if k == "--compact" {
+            a.compact = true;
             i += 1;
             continue;
         }
@@ -89,6 +103,11 @@ fn parse_args() -> Args {
                 let (w, h) = v.split_once('x').expect("WxH");
                 a.width = w.parse().expect("w");
                 a.height = h.parse().expect("h");
+            }
+            "--wg" => {
+                let (x, y) = v.split_once('x').expect("WxH");
+                a.wg = (x.parse().expect("wg x"), y.parse().expect("wg y"));
+                assert!(a.wg.0 * a.wg.1 >= 32 && a.wg.0 * a.wg.1 <= 512, "wg must be 32..512 threads");
             }
             _ => {
                 eprintln!("unknown arg {k}");
@@ -290,12 +309,24 @@ fn bind_group_layout(gpu: &Gpu, label: &str, kinds: &[Binding]) -> wgpu::BindGro
 /// bench.wgsl's group 0 is shared by primary/bounce/shadow, but bounce and
 /// shadow do not statically use imageOut, so auto layouts cannot share the
 /// group-0 bind group. Group 1 is the backend's read-only structure buffers.
-fn trace_pipeline_layout(gpu: &Gpu, backend_buffers: usize) -> wgpu::PipelineLayout {
-    let g0 = bind_group_layout(
-        gpu,
-        "bench-g0",
-        &[Binding::Uniform, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage],
-    );
+/// `with_indirect_binding`: the primary/prep pipelines bind indirectArgs as
+/// writable storage (binding 6); the secondary passes must NOT have it in
+/// their layout at all — wgpu's usage scopes forbid STORAGE_READ_WRITE and
+/// INDIRECT on the same buffer inside one dispatch scope, and the compacted
+/// entry points never reference it.
+fn trace_pipeline_layout(gpu: &Gpu, backend_buffers: usize, with_indirect_binding: bool) -> wgpu::PipelineLayout {
+    let mut g0_bindings = vec![
+        Binding::Uniform,
+        Binding::Storage,
+        Binding::Storage,
+        Binding::Storage,
+        Binding::Storage,
+        Binding::Storage, // compactHits
+    ];
+    if with_indirect_binding {
+        g0_bindings.push(Binding::Storage); // indirectArgs
+    }
+    let g0 = bind_group_layout(gpu, "bench-g0", &g0_bindings);
     let g1 = bind_group_layout(gpu, "trace-g1", &vec![Binding::StorageRead; backend_buffers]);
     gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("trace"),
@@ -684,15 +715,31 @@ fn main() {
     }
 
     // --- Trace ---------------------------------------------------------------
-    let trace_src = shader(&shader_dir, &backend.trace_files(&args.traversal));
+    // Workgroup size is a tuning knob (--wg WxH): at the default 8x8 = 64
+    // threads (2 warps/CTA), Ampere's 16-CTA/SM limit caps occupancy at
+    // 32/48 warps = 67% before registers are even considered.
+    let trace_src = shader(&shader_dir, &backend.trace_files(&args.traversal))
+        .replace("@workgroup_size(8, 8)", &format!("@workgroup_size({}, {})", args.wg.0, args.wg.1));
     let trace_mod = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
     });
-    let trace_pl = trace_pipeline_layout(&gpu, backend.trace_buffers().len());
+    let trace_pl = trace_pipeline_layout(&gpu, backend.trace_buffers().len(), true);
+    let trace_pl_sec = trace_pipeline_layout(&gpu, backend.trace_buffers().len(), false);
     let p_primary = compute_pipeline_with(&gpu, &trace_mod, "primary", Some(&trace_pl));
-    let p_bounce = compute_pipeline_with(&gpu, &trace_mod, "bounce", Some(&trace_pl));
-    let p_shadow = compute_pipeline_with(&gpu, &trace_mod, "shadow", Some(&trace_pl));
+    let p_bounce = compute_pipeline_with(
+        &gpu,
+        &trace_mod,
+        if args.compact { "bounce_compact" } else { "bounce" },
+        Some(&trace_pl_sec),
+    );
+    let p_shadow = compute_pipeline_with(
+        &gpu,
+        &trace_mod,
+        if args.compact { "shadow_compact" } else { "shadow" },
+        Some(&trace_pl_sec),
+    );
+    let p_prep = compute_pipeline_with(&gpu, &trace_mod, "prep", Some(&trace_pl));
 
     let npix = args.width as u64 * args.height as u64;
     let ub = bench_uniform(&args);
@@ -714,36 +761,72 @@ fn main() {
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
     );
 
+    let compact_hits = buffer(
+        &gpu.device,
+        "compact-hits",
+        (npix + 1) * 4,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
+    let indirect_args = buffer(
+        &gpu.device,
+        "indirect-args",
+        12,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+    );
+
     let backend_bufs = backend.trace_buffers();
-    let bg0_p = bind(&gpu, &p_primary, 0, &[&bench_params, &image_out, &hit_t, &hit_nmat, &stats]);
+    let g0_full: [&wgpu::Buffer; 7] =
+        [&bench_params, &image_out, &hit_t, &hit_nmat, &stats, &compact_hits, &indirect_args];
+    let g0_sec: [&wgpu::Buffer; 6] = [&bench_params, &image_out, &hit_t, &hit_nmat, &stats, &compact_hits];
+    let bg0_p = bind(&gpu, &p_primary, 0, &g0_full);
     let bg1_p = bind(&gpu, &p_primary, 1, &backend_bufs);
-    let bg0_b = bind(&gpu, &p_bounce, 0, &[&bench_params, &image_out, &hit_t, &hit_nmat, &stats]);
+    let bg0_b = bind(&gpu, &p_bounce, 0, &g0_sec);
     let bg1_b = bind(&gpu, &p_bounce, 1, &backend_bufs);
-    let bg0_s = bind(&gpu, &p_shadow, 0, &[&bench_params, &image_out, &hit_t, &hit_nmat, &stats]);
+    let bg0_s = bind(&gpu, &p_shadow, 0, &g0_sec);
     let bg1_s = bind(&gpu, &p_shadow, 1, &backend_bufs);
 
     let ts = Timestamps::new(&gpu, 8);
-    let gx = args.width.div_ceil(8);
-    let gy = args.height.div_ceil(8);
+    let gx = args.width.div_ceil(args.wg.0);
+    let gy = args.height.div_ceil(args.wg.1);
 
     let mut per_class: Vec<[f64; 3]> = Vec::new();
     for _frame in 0..args.frames.max(2) {
         gpu.queue.write_buffer(&stats, 0, &[0u8; 16]);
+        gpu.queue.write_buffer(&compact_hits, 0, &[0u8; 4]); // reset hit count
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        let passes: [(&wgpu::ComputePipeline, &wgpu::BindGroup, &wgpu::BindGroup, &str); 3] = [
-            (&p_primary, &bg0_p, &bg1_p, "primary"),
-            (&p_bounce, &bg0_b, &bg1_b, "bounce"),
-            (&p_shadow, &bg0_s, &bg1_s, "shadow"),
-        ];
-        for (i, (p, bg0, bg1, label)) in passes.iter().enumerate() {
+        {
+            // Primary pass; with --compact its epilogue converts the hit
+            // count into indirect args for the 1D passes (same-pass storage
+            // ordering guarantees prep sees primary's writes; the indirect
+            // buffer is only consumed in later passes).
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("primary"),
+                timestamp_writes: Some(ts.pass_writes(0)),
+            });
+            pass.set_pipeline(&p_primary);
+            pass.set_bind_group(0, &bg0_p, &[]);
+            pass.set_bind_group(1, &bg1_p, &[]);
+            pass.dispatch_workgroups(gx, gy, 1);
+            if args.compact {
+                pass.set_pipeline(&p_prep);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+        }
+        let secondary: [(&wgpu::ComputePipeline, &wgpu::BindGroup, &wgpu::BindGroup, &str); 2] =
+            [(&p_bounce, &bg0_b, &bg1_b, "bounce"), (&p_shadow, &bg0_s, &bg1_s, "shadow")];
+        for (i, (p, bg0, bg1, label)) in secondary.iter().enumerate() {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
-                timestamp_writes: Some(ts.pass_writes(i as u32 * 2)),
+                timestamp_writes: Some(ts.pass_writes((i as u32 + 1) * 2)),
             });
             pass.set_pipeline(p);
             pass.set_bind_group(0, *bg0, &[]);
             pass.set_bind_group(1, *bg1, &[]);
-            pass.dispatch_workgroups(gx, gy, 1);
+            if args.compact {
+                pass.dispatch_workgroups_indirect(&indirect_args, 0);
+            } else {
+                pass.dispatch_workgroups(gx, gy, 1);
+            }
         }
         gpu.queue.submit([enc.finish()]);
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
@@ -872,7 +955,7 @@ fn gate_primary(gpu: &Gpu, args: &Args, shader_dir: &str, backend: &Backend, ben
         label: Some("gate-trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
     });
-    let trace_pl = trace_pipeline_layout(gpu, backend.trace_buffers().len());
+    let trace_pl = trace_pipeline_layout(gpu, backend.trace_buffers().len(), true);
     let p_primary = compute_pipeline_with(gpu, &trace_mod, "primary", Some(&trace_pl));
 
     let image_out = buffer(&gpu.device, "image", npix * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
@@ -881,8 +964,11 @@ fn gate_primary(gpu: &Gpu, args: &Args, shader_dir: &str, backend: &Backend, ben
         buffer(&gpu.device, "hit-nmat", npix * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
     let stats = buffer(&gpu.device, "stats", 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
     gpu.queue.write_buffer(&stats, 0, &[0u8; 16]);
+    let compact = buffer(&gpu.device, "compact", (npix + 1) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    let indirect = buffer(&gpu.device, "indirect", 12, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT);
+    gpu.queue.write_buffer(&compact, 0, &[0u8; 4]);
 
-    let bg0 = bind(gpu, &p_primary, 0, &[bench_params, &image_out, &hit_t, &hit_nmat, &stats]);
+    let bg0 = bind(gpu, &p_primary, 0, &[bench_params, &image_out, &hit_t, &hit_nmat, &stats, &compact, &indirect]);
     let bg1 = bind(gpu, &p_primary, 1, &backend.trace_buffers());
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     {
