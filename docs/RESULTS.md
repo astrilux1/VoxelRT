@@ -109,8 +109,14 @@ sparse-brickmap control at the 1024³ claim tier per the pre-registered
 criteria (`docs/S64.md`): **incoherent bounce +44.3%** (bar ≥+20%),
 primary +56.5%, shadow +8.6%, **memory 0.47×** — independently re-verified
 within 1%. The small-stack variant *failed* the same criteria (bounce
-+5.6%, shadow −26.6%): the win is register residency, not tree shape —
-worth a hardware-counter confirmation before the writeup. Correctness:
++5.6%, shadow −26.6%). **Hardware counters (Nsight GPU Trace, 2026-07-19)
+confirmed the occupancy mechanism and corrected its cause**: not register
+pressure (RF allocation ~equal across variants) but an L1-shared carveout
+for the dynamically-indexed stack (15.4% of L1, only in that variant)
+halving CTA residency, +63% instructions for stack maintenance, and
+spill-through DRAM writes; stackless additionally keeps traversal
+L1-resident (L2 at 2.3% of peak vs brickmap's 13.7%). First hardware-
+counter result of the project — the profiling workflow is live. Correctness:
 GPU builders byte-match a CPU reference on the real browser scene; the
 identity gate was re-registered (v1's absolute tolerance sat below f32 ULP
 at 1024³ distances; failure trail preserved in S64.md §7) and passes with

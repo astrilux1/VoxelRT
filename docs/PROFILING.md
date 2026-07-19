@@ -22,7 +22,12 @@ Setup that is live on the benchmark machine:
   frame triggers never fire — use **`--limit-to-submits`** (submit-based
   boundaries). Verified: ngfx launches the app, layer engages, session
   establishes, submits are detected.
-- **Blocked on one machine setting**: NVIDIA restricts GPU performance
+- ~~Blocked~~ RESOLVED 2026-07-19: the user enabled counters for all users
+  (NVIDIA Control Panel developer toggle + reboot); captures now run
+  unelevated. First assignment complete - see docs/S64.md 00a78.2. Note:
+  run ngfx captures one at a time (back-to-back scripted launches hit
+  session contention).
+- (superseded) NVIDIA restricts GPU performance
   counters to admin (`RmProfilingAdminOnly`). Either run
   `native\profile-s64.ps1` from an **elevated** PowerShell (no driver
   change needed), or flip once in NVIDIA Control Panel → Developer →
