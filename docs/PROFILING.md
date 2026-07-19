@@ -1,6 +1,6 @@
 # Hardware-counter profiling workflow (claim-v2 core instrument)
 
-## Native path — INSTALLED AND WORKING 2026-07-19 (one user action pending)
+## Native path — INSTALLED AND OPERATIONAL 2026-07-19
 
 The platform decision (native wgpu, Vulkan backend) obsoletes the browser
 workarounds below for v2 work: Nsight hooks `voxelrt-native.exe` directly.
@@ -22,20 +22,17 @@ Setup that is live on the benchmark machine:
   frame triggers never fire — use **`--limit-to-submits`** (submit-based
   boundaries). Verified: ngfx launches the app, layer engages, session
   establishes, submits are detected.
-- ~~Blocked~~ RESOLVED 2026-07-19: the user enabled counters for all users
-  (NVIDIA Control Panel developer toggle + reboot); captures now run
-  unelevated. First assignment complete - see docs/S64.md 00a78.2. Note:
-  run ngfx captures one at a time (back-to-back scripted launches hit
-  session contention).
-- (superseded) NVIDIA restricts GPU performance
-  counters to admin (`RmProfilingAdminOnly`). Either run
-  `native\profile-s64.ps1` from an **elevated** PowerShell (no driver
-  change needed), or flip once in NVIDIA Control Panel → Developer →
-  Manage GPU Performance Counters → allow all users, then reboot.
-- First assignment queued in `native\profile-s64.ps1`: per-dispatch SM
-  occupancy / local-memory traffic / warp-stall comparison of s64-stack vs
-  s64-stackless vs brickmap — the hardware confirmation of the S64
-  promotion's register-spill explanation (docs/S64.md §8.2).
+- Counter access: RESOLVED 2026-07-19 — GPU performance counters enabled
+  for all users (NVIDIA Control Panel developer toggle + reboot), so
+  captures run unelevated. Previously NVIDIA's `RmProfilingAdminOnly`
+  default blocked the session at "GPU Performance Counters unavailable".
+- Operational note: run ngfx captures **one at a time** — back-to-back
+  scripted launches hit session contention ("Failed to connect"); single
+  sequential invocations are reliable.
+- First assignment complete (docs/S64.md §8.2): the S64 stack-vs-stackless
+  occupancy mechanism, measured and corrected — L1-shared carveout for the
+  dynamically-indexed stack, not register-file pressure. Raw exports in
+  `test/eval/gputrace/`.
 
 Unelevated `nsys` caveats on this machine: WDDM trace, CPU sampling, and
 GPU-metrics sampling are disabled without admin; timeline + Vulkan API
