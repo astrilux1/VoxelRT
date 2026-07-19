@@ -12,8 +12,13 @@ struct ScanParams { n : u32, _p0 : u32, _p1 : u32, _p2 : u32 };
 
 var<workgroup> tile : array<u32, 256>;
 
-fn wg_exclusive_scan(li : u32) {
-  // Hillis-Steele in shared memory, then shift to exclusive.
+// Hillis-Steele inclusive scan of tile[] in shared memory. 4-element trace
+// of [a, b, c, d]:
+//   offset 1 -> [a, a+b, b+c, c+d]
+//   offset 2 -> [a, a+b, a+b+c, a+b+c+d]   (inclusive prefix)
+// Callers derive the exclusive prefix as inclusive - original element.
+// The trailing barrier makes every tile[li] visible to all threads on return.
+fn wg_inclusive_scan(li : u32) {
   var offset = 1u;
   loop {
     if (offset >= 256u) { break; }
@@ -33,14 +38,13 @@ fn scan_blocks(@builtin(global_invocation_id) gid : vec3<u32>,
                @builtin(workgroup_id) wid : vec3<u32>) {
   let li = l.x;
   let i = gid.x;
-  tile[li] = select(0u, buf[i], i < sp.n);
-  wg_exclusive_scan(li);
+  let x = select(0u, buf[i], i < sp.n);
+  tile[li] = x;
+  wg_inclusive_scan(li);
   let inclusive = tile[li];
-  workgroupBarrier();
-  if (i < sp.n) {
-    let orig = buf[i];
-    buf[i] = inclusive - orig;           // exclusive
-  }
+  if (i < sp.n) { buf[i] = inclusive - x; }        // exclusive
+  // Zero-padding above means thread 255's inclusive value is the block
+  // total even when the tail block is partially filled.
   if (li == 255u) { blockSums[wid.x] = inclusive; }
 }
 
@@ -48,27 +52,27 @@ fn scan_blocks(@builtin(global_invocation_id) gid : vec3<u32>,
 fn scan_sums(@builtin(local_invocation_id) l : vec3<u32>) {
   let li = l.x;
   let nBlocks = (sp.n + 255u) / 256u;
-  // Serial-in-parallel: each thread accumulates strided chunks; simplest
-  // correct approach for <= 64k blocks is a loop over chunks of 256.
+  // Serial-in-parallel: scan 256-block chunks in sequence, carrying the
+  // running total between chunks through tile[0].
   var base = 0u;
   var chunk = 0u;
   loop {
     let idx = chunk * 256u + li;
-    tile[li] = select(0u, blockSums[idx], idx < nBlocks);
-    wg_exclusive_scan(li);
+    let x = select(0u, blockSums[idx], idx < nBlocks);
+    tile[li] = x;
+    wg_inclusive_scan(li);
     let inclusive = tile[li];
-    workgroupBarrier();
-    if (idx < nBlocks) {
-      let orig = blockSums[idx];
-      blockSums[idx] = base + inclusive - orig;
-    }
-    // carry the chunk total forward
+    if (idx < nBlocks) { blockSums[idx] = base + inclusive - x; }
+    // Carry invariant: every thread reads its inclusive value before tile[0]
+    // is overwritten, and every thread reads tile[0] before the next chunk
+    // overwrites tile[] — a barrier is required on each side of both writes.
     workgroupBarrier();
     if (li == 255u) { tile[0] = base + inclusive; }
     workgroupBarrier();
     base = tile[0];
     chunk += 1u;
     if (chunk * 256u >= nBlocks) { break; }
+    workgroupBarrier();
   }
 }
 

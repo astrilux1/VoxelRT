@@ -2,6 +2,23 @@
 
 ## 2026-07-01 campaign update (see docs/PLAN.md for the full plan)
 
+- **2026-07-18 v1 BASELINE CAMPAIGN COMPLETE: `ours` is at parity with `lin`,
+  not 2-3×.** Full run of PLAN §7.6 (6 scenarios × base/gi/lin/ours_unbiased/
+  ours × 9 checkpoints × 5 repeats, 1920×1080, HDR-FLIP vs frozen rb12
+  references; equal-time analysis via the new `npm run analyze`). Headline:
+  equal-FLIP speedup of ours vs lin has per-scenario medians **0.87×–1.19×**
+  and equal-time FLIP ratios 0.97×–1.02× — parity, slightly behind on
+  interior/exterior statics, ~1.18× ahead only on lamps (power-sampled light
+  list vs heterogeneous emitters). Both stacks beat `base` by 1.5–3.5× lower
+  FLIP at equal time. PLAN §4 blocker #1 (unfrozen honest ratio) is resolved
+  by measurement: frozen at parity (diagnostic seeds). Consequences: the 2-3×
+  target rests entirely on techniques not yet promoted (Phase 3 ladder, the
+  redirected initial-sampling bet) plus the §6.2-style optimization phase
+  (initial sampling is 68–72% of frame cost in both stacks; ours also pays
+  +2.2 ms/f spatial over lin). A harness↔paper methodology gap surfaced:
+  `_move` checkpoints evaluate at moving poses, making FLIP-vs-frames
+  non-monotone for every config; v2 needs a fixed-capture-pose motion mode
+  (Lin 2026 §7.4 shape). Details: docs/RESULTS.md, test/eval/analysis.md.
 - **2026-07-18 Stakeholder interview: materials become core; paper is source
   of truth.** Two interview rounds settled the project's direction. **(1)
   Scope:** glossy, specular, and glass are core framework features, not

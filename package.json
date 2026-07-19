@@ -16,6 +16,7 @@
     "bench:references": "node test/bench.mjs --claim --validate-refs",
     "bench:references:checkpoints": "node test/bench.mjs --validate-refs --validate-ref-checkpoints --resolution 1920x1080 --scale 1",
     "bench:correctness": "node test/bench.mjs --claim --suite correctness",
+    "dump:fixture": "node test/dump-scene.mjs",
     "analyze": "node test/analyze.mjs",
     "analyze:cost": "node test/analyze.mjs --cost-table",
     "bench:ablation": "node test/bench.mjs --suite ablation --resolution 1920x1080 --scale 1 --flip",

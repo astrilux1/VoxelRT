@@ -30,21 +30,19 @@ struct GenParams {
 
 var<workgroup> wg_any : atomic<u32>;
 
-fn brick_origin(bi : u32) -> vec3<u32> {
-  return vec3<u32>(bi % BGRID, (bi / BGRID) % BGRID, bi / (BGRID * BGRID)) * BRICK;
-}
-
 @compute @workgroup_size(8, 8, 8)
 fn pass_occupancy(@builtin(workgroup_id) wid : vec3<u32>,
                   @builtin(local_invocation_id) lid : vec3<u32>,
                   @builtin(local_invocation_index) li : u32) {
   if (li == 0u) { atomicStore(&wg_any, 0u); }
   workgroupBarrier();
-  let bi = wid.x + wid.y * BGRID + wid.z * BGRID * BGRID;
-  let p = brick_origin(bi) + lid;
+  let p = wid * BRICK + lid;
   if (voxel_material(p, gp.seed) != 0u) { atomicOr(&wg_any, 1u); }
   workgroupBarrier();
-  if (li == 0u) { brickOccupied[bi] = atomicLoad(&wg_any); }
+  if (li == 0u) {
+    let bi = wid.x + wid.y * BGRID + wid.z * BGRID * BGRID;
+    brickOccupied[bi] = atomicLoad(&wg_any);
+  }
 }
 
 var<workgroup> wg_mask : array<atomic<u32>, 16>;
@@ -59,16 +57,19 @@ fn pass_fill(@builtin(workgroup_id) wid : vec3<u32>,
 
   let occupied = brickOccupied[bi] != 0u;
   let slot = brickSlot[bi];
-  let p = brick_origin(bi) + lid;
-  var m = 0u;
   if (occupied) {
-    m = voxel_material(p, gp.seed);
-    let bit = lid.x + lid.y * BRICK + lid.z * BRICK * BRICK;
-    if (m != 0u) { atomicOr(&wg_mask[bit >> 5u], 1u << (bit & 31u)); }
+    // li == lid.x + lid.y*8 + lid.z*64 (WGSL local_invocation_index layout),
+    // i.e. exactly the linear voxel index brickVoxelOccupied() expects for
+    // both the mask bit and the material slot.
+    let m = voxel_material(wid * BRICK + lid, gp.seed);
+    if (m != 0u) { atomicOr(&wg_mask[li >> 5u], 1u << (li & 31u)); }
     brickMats[slot * 512u + li] = m;
   }
   workgroupBarrier();
   if (li == 0u) {
+    // Unoccupied bricks carry the slot value of the next occupied brick
+    // (exclusive scan does not advance on zeros), so only the pointer entry
+    // may ever be written for them.
     brickPtr[bi] = select(0xffffffffu, slot, occupied);
   }
   if (occupied && li < 16u) {

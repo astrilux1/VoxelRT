@@ -27,7 +27,7 @@ struct BenchParams {
 @group(0) @binding(0) var<uniform> bp : BenchParams;
 @group(0) @binding(1) var<storage, read_write> imageOut : array<u32>;   // rgba8 packed
 @group(0) @binding(2) var<storage, read_write> hitT : array<f32>;
-@group(0) @binding(3) var<storage, read_write> hitNMat : array<vec4<u32>>; // n(oct16 in x), mat in y, pos in zw? keep simple: n packed, mat
+@group(0) @binding(3) var<storage, read_write> hitNMat : array<vec4<u32>>; // x = face-normal code (pack_normal), y = packed material, zw unused
 @group(0) @binding(4) var<storage, read_write> stats : array<atomic<u32>>; // [0]=primary hits, [1]=bounce hits, [2]=shadow occluded
 
 fn pcg(v : u32) -> u32 {
