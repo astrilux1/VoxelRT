@@ -87,6 +87,26 @@ committed); log: `test/eval/logs/refcheckpoints2-2026-07-18.log`.
   the kill was reached in a diffuse-only renderer; glossy reuse validity is
   view-dependent and may change the calculus.
 
+### Phase-3 ladder, rung 2 (2026-07-19) — all four candidates fail promotion
+
+`npm run bench:ladder` (32f, 3 seeds, 3 scenarios, 64f references — internal
+comparisons only). Deltas vs the `ours` control (quality = FLIP improvement,
+time = GPU ms change; promotion bar: ≥5% quality at matched time on ≥2
+scenarios, no scenario regressing >2%):
+
+| config | interior_static | lamps_static | exterior_move | verdict |
+|---|---|---|---|---|
+| ours_sigma32 | 0.0%q | −0.3%q | **−4.3%q** | **killed** (regression >2%; the earlier "repeat-stable Tier-1 signal" does not survive) |
+| ours_adaptcand | 0.0%q +0.1%t | +0.8%q +3.3%t | +0.2%q +3.1%t | **killed** (neutral quality, pays time) |
+| ours_lightgrid | 0.0%q −3.6%t | −1.3%q | 0.0%q +3.2%t | **killed** (no signal) |
+| ours_adapt_lightgrid | +12.5%t | +15.8%t | +20.7%t | **killed** (large cost, no quality) |
+| ours_mutate | =control | =control | =control | **parked**: FLIP identical to its `ours_no_dup` control to 4 decimals — not inert (dupmap pass runs, +0.9 ms), but its effect targets correlation artifacts these scenarios don't exhibit at rung-2 budgets. Missing test named: the `lamps_glossy` correlation-stress scene (SCENES.md #3). |
+
+Side finding: `ours_no_dup` shows dupmap's value is ~1% FLIP for ~3–8% GPU
+time on these scenarios — worth revisiting when the `ours` preset is
+reduced to promoted techniques (PLAN §7.8), since none of its companions
+survived.
+
 ### Known limitations of the v1 record
 
 - Diffuse-only (Lambertian + emissive): footprint/reconnection rows
