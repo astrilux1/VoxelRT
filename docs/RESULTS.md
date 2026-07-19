@@ -107,6 +107,21 @@ time on these scenarios — worth revisiting when the `ours` preset is
 reduced to promoted techniques (PLAN §7.8), since none of its companions
 survived.
 
+### Presented-axis rung + bias probe (2026-07-19)
+
+- **ours_confdenoise: no measurable effect on its own designed axis**
+  (denoise on, three motion scenarios: FLIP and GPU ms identical to
+  control at 4 decimals). Mechanism explains it: the modulation scales by
+  confk×(1−confidence), and at 32f confidence ≈ 1 outside transient
+  slivers. **Parked** with the missing test named: short-budget/transient
+  evaluation (2–8f post-disocclusion or the fixed-capture-pose motion
+  mode). One verification note: confirm the à-trous ping-pong parity puts
+  the final iteration in `tex.denoise[0]` (the capture's tap).
+- **Bias-map probe failed as registered and is invalid** — three named
+  causes (analysis EPS, bounce mismatch, 32f transient + firefly tail);
+  see `docs/BIASMAP.md` §7–8. The seed-averaged bias verification the
+  claim wording needs is still outstanding, pending BIASMAP v2.
+
 ### Known limitations of the v1 record
 
 - Diffuse-only (Lambertian + emissive): footprint/reconnection rows
