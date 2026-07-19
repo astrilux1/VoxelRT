@@ -1,0 +1,77 @@
+// GPU build of the sparse brickmap: 1024^3 world, 8^3 bricks, 128^3 pointer
+// grid. Three passes over the pure voxel_material() function from gen.wgsl
+// (concatenated ahead of this file by the host):
+//
+//   pass_occupancy: one workgroup per brick (8^3 = 512 threads), workgroup-OR
+//     of voxel occupancy -> brickOccupied[bi] = 0/1 count word
+//   (host-side or GPU exclusive scan over brickOccupied -> brickSlot[])
+//   pass_fill: one workgroup per *occupied* brick: writes the 512-bit mask
+//     (16 u32 words) and 512 material u32s into the brick's allocated slot,
+//     and the pointer grid entry.
+//
+// The scan is done in scan.wgsl (generic exclusive scan over u32s).
+
+const BRICK : u32 = 8u;
+const BGRID : u32 = 128u;   // GRID / BRICK
+
+struct GenParams {
+  seed : u32,
+  gridShift : u32,   // log2(GRID) - unused hook for other grid sizes
+  _pad0 : u32,
+  _pad1 : u32,
+};
+
+@group(0) @binding(0) var<uniform> gp : GenParams;
+@group(0) @binding(1) var<storage, read_write> brickOccupied : array<u32>; // 1 if any voxel solid
+@group(0) @binding(2) var<storage, read> brickSlot : array<u32>;           // exclusive scan of occupied
+@group(0) @binding(3) var<storage, read_write> brickPtr : array<u32>;      // pointer grid, 0xffffffff = empty
+@group(0) @binding(4) var<storage, read_write> brickMasks : array<u32>;    // 16 u32 per allocated brick
+@group(0) @binding(5) var<storage, read_write> brickMats : array<u32>;     // 512 u32 per allocated brick
+
+var<workgroup> wg_any : atomic<u32>;
+
+fn brick_origin(bi : u32) -> vec3<u32> {
+  return vec3<u32>(bi % BGRID, (bi / BGRID) % BGRID, bi / (BGRID * BGRID)) * BRICK;
+}
+
+@compute @workgroup_size(8, 8, 8)
+fn pass_occupancy(@builtin(workgroup_id) wid : vec3<u32>,
+                  @builtin(local_invocation_id) lid : vec3<u32>,
+                  @builtin(local_invocation_index) li : u32) {
+  if (li == 0u) { atomicStore(&wg_any, 0u); }
+  workgroupBarrier();
+  let bi = wid.x + wid.y * BGRID + wid.z * BGRID * BGRID;
+  let p = brick_origin(bi) + lid;
+  if (voxel_material(p, gp.seed) != 0u) { atomicOr(&wg_any, 1u); }
+  workgroupBarrier();
+  if (li == 0u) { brickOccupied[bi] = atomicLoad(&wg_any); }
+}
+
+var<workgroup> wg_mask : array<atomic<u32>, 16>;
+
+@compute @workgroup_size(8, 8, 8)
+fn pass_fill(@builtin(workgroup_id) wid : vec3<u32>,
+             @builtin(local_invocation_id) lid : vec3<u32>,
+             @builtin(local_invocation_index) li : u32) {
+  let bi = wid.x + wid.y * BGRID + wid.z * BGRID * BGRID;
+  if (li < 16u) { atomicStore(&wg_mask[li], 0u); }
+  workgroupBarrier();
+
+  let occupied = brickOccupied[bi] != 0u;
+  let slot = brickSlot[bi];
+  let p = brick_origin(bi) + lid;
+  var m = 0u;
+  if (occupied) {
+    m = voxel_material(p, gp.seed);
+    let bit = lid.x + lid.y * BRICK + lid.z * BRICK * BRICK;
+    if (m != 0u) { atomicOr(&wg_mask[bit >> 5u], 1u << (bit & 31u)); }
+    brickMats[slot * 512u + li] = m;
+  }
+  workgroupBarrier();
+  if (li == 0u) {
+    brickPtr[bi] = select(0xffffffffu, slot, occupied);
+  }
+  if (occupied && li < 16u) {
+    brickMasks[slot * 16u + li] = atomicLoad(&wg_mask[li]);
+  }
+}
