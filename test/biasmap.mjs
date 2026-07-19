@@ -78,7 +78,15 @@ for (let r = 0; r < repeats; r++) {
 const ref = loadF32(refPath, 'reference');
 
 // --- Stats -------------------------------------------------------------------
-const EPS = 1e-4;
+// Relative-error floor: a fixed tiny EPS explodes in near-black linear-HDR
+// pixels (shadowed geometry at 1e-6 radiance). Floor at 1% of the reference's
+// mean luminance instead, the convention relative-error images use.
+let refLumSum = 0;
+{
+  const refPre = loadF32(refPath, 'reference (pre-scan)');
+  for (let i = 0; i < nch; i++) refLumSum += refPre[i];
+}
+const EPS = Math.max(1e-4, 0.01 * (refLumSum / nch));
 let refSum = [0, 0, 0];
 let meanSum = [0, 0, 0];
 let residSq = 0;

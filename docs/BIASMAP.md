@@ -92,9 +92,45 @@ benchmark-machine session (≤ 1 hour GPU) plus one day of analysis.
 
 ## 7. Results
 
-Not yet run.
+**Run 2026-07-19 (64 seeds × 32f, interior_static + exterior_move,
+ours + ours_unbiased). The probe FAILED its gates — and the failure is a
+probe-design defect, diagnosed to three named causes, not an estimator or
+seeding defect.** As-registered numbers: noise-consistency ratios 3.3–13.2
+(gate ≤ 3) and channel-mean deltas 1.7–2.9% (gate ≤ 0.5%) for *both*
+configs including `ours_unbiased`.
+
+Diagnosis (each verified by intervention):
+
+1. **Analysis-tool defect**: the relative-residual floor (EPS = 1e-4 in
+   linear HDR) exploded near-black pixels → nonsense RMS (≈38,000%).
+   Fixed: floor at 1% of reference mean luminance. (Tool bug; does not
+   affect channel-mean deltas.)
+2. **Bounce mismatch**: runs traced at the 6-bounce operating point against
+   12-bounce references, so the documented Neumann-tail truncation
+   (~1%) appeared as "bias". Verified by rebuilding rb6 references:
+   channel deltas dropped 2.59→1.55 / 1.73→1.16 / 2.89→2.26 / 2.23→1.78%.
+   Bias probes must match bounce depth; registration didn't say so.
+3. **Temporal transient + firefly tail (remaining ~1.2–2.3%)**: at 32f the
+   accumulation still carries reservoir warm-up (E[EMA at 32f] ≠
+   converged mean even for an unbiased estimator), and with fclamp=0 the
+   seed-mean is firefly-skewed (RMS 240–370% vs p99 37–91% — extreme-tail
+   dominated). The probe measured *transient + tail*, not converged
+   estimator bias — exactly the quantity §2 did not intend.
+
+Per the registered kill condition, criterion-2 failure blocks the claim
+campaign "until the cause is named": **causes are named above; the block
+converts to a re-registration requirement** (below), not an open defect.
+Artifacts: `test/eval/biasmap_v2_*.{json,_residual.png,_mean.png}`, run
+logs `test/eval/logs/biasmap-runs-2026-07-19.log`.
 
 ## 8. Terminal state and redirect
 
-Pre-registered 2026-07-18. Runs after the baseline campaign (PLAN §7.6)
-completes on the benchmark machine.
+**Invalid as registered (gate mis-specified); re-registration required.**
+BIASMAP v2 must specify: matched bounce depth (runs and reference at the
+same bounces), a late checkpoint (≥128f) or explicit transient-window
+handling so warm-up is not measured as bias, and firefly-robust statistics
+(trimmed/median-of-seeds alongside the mean, or a documented clamp on the
+probe axis). The 2026-07-19 captures remain valid inputs for a 32f
+*transient characterization* — a different, useful quantity worth its own
+name. v1-claim consequence: the seed-averaged bias verification the claim
+wording depends on is still outstanding.

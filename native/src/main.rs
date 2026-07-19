@@ -22,8 +22,17 @@ struct Args {
     backend: String,
     /// s64 traversal variant (docs/S64.md §4 budget): "stack" = variant 1
     /// (small-stack descent, s64_trace.wgsl), "stackless" = variant 2
-    /// (stackless re-descent, s64_trace_stackless.wgsl). Ignored by brickmap.
+    /// (stackless re-descent, s64_trace_stackless.wgsl), "stackless-opt" =
+    /// the docs/S64OPT.md optimization rung over variant 2
+    /// (s64_trace_stackless_opt.wgsl). Ignored by brickmap.
     traversal: String,
+    /// --opt-levers (stackless-opt only): comma list of levers to enable —
+    /// memo, mirror, skip, anyhit — or "none" to disable all. Absent = all
+    /// on. Applied by string-replacing the kernel's `const ENABLE_*` flags
+    /// (see the opt kernel's header); "anyhit" additionally compiles a
+    /// second module with ENABLE_ANYHIT=true used only for the shadow
+    /// pipelines (bench.wgsl is frozen, so any-hit is per-module).
+    opt_levers: Option<String>,
     scene: String,
     width: u32,
     height: u32,
@@ -46,6 +55,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         backend: "brickmap".into(),
         traversal: "stack".into(),
+        opt_levers: None,
         scene: "sparse1024".into(),
         width: 1920,
         height: 1080,
@@ -88,11 +98,20 @@ fn parse_args() -> Args {
         match k.as_str() {
             "--backend" => a.backend = v,
             "--traversal" => {
-                if v != "stack" && v != "stackless" {
-                    eprintln!("unknown traversal {v} (expected stack or stackless)");
+                if v != "stack" && v != "stackless" && v != "stackless-opt" {
+                    eprintln!("unknown traversal {v} (expected stack, stackless or stackless-opt)");
                     std::process::exit(2);
                 }
                 a.traversal = v;
+            }
+            "--opt-levers" => {
+                for tok in v.split(',') {
+                    if !matches!(tok, "memo" | "mirror" | "skip" | "anyhit" | "none") {
+                        eprintln!("unknown lever {tok} (expected memo, mirror, skip, anyhit or none)");
+                        std::process::exit(2);
+                    }
+                }
+                a.opt_levers = Some(v);
             }
             "--scene" => a.scene = v,
             "--frames" => a.frames = v.parse().expect("frames"),
@@ -116,7 +135,64 @@ fn parse_args() -> Args {
         }
         i += 2;
     }
+    if a.opt_levers.is_some() && a.traversal != "stackless-opt" {
+        eprintln!("--opt-levers requires --traversal stackless-opt");
+        std::process::exit(2);
+    }
     a
+}
+
+impl Args {
+    /// Resolved lever set for the stackless-opt kernel, in the fixed order
+    /// [memo, mirror, skip, anyhit]. Absent --opt-levers = all on ("none"
+    /// contributes nothing, so `--opt-levers none` = all off).
+    fn levers(&self) -> [bool; 4] {
+        let Some(s) = self.opt_levers.as_deref() else { return [true; 4] };
+        let mut l = [false; 4];
+        for tok in s.split(',') {
+            match tok {
+                "memo" => l[0] = true,
+                "mirror" => l[1] = true,
+                "skip" => l[2] = true,
+                "anyhit" => l[3] = true,
+                _ => {} // "none"; unknown tokens rejected in parse_args
+            }
+        }
+        l
+    }
+}
+
+/// Flip one `const NAME : bool = ...;` lever declaration in the opt kernel
+/// source. Panics if the declaration is missing: the exact text is part of
+/// the --opt-levers string-toggle contract (opt kernel header), and drift
+/// must fail loudly, not silently run with the wrong lever set.
+fn set_shader_flag(src: &str, name: &str, value: bool) -> String {
+    let decl_t = format!("const {name} : bool = true;");
+    let decl_f = format!("const {name} : bool = false;");
+    let (want, other) = if value { (decl_t, decl_f) } else { (decl_f, decl_t) };
+    if src.contains(&want) {
+        return src.to_string();
+    }
+    assert!(src.contains(&other), "opt kernel: `const {name} : bool = ...;` declaration not found");
+    src.replacen(&other, &want, 1)
+}
+
+/// Assemble the trace shader source for the selected traversal, applying the
+/// --opt-levers const toggles for the stackless-opt kernel. `anyhit_module`:
+/// the shadow pipelines are built from a second module with ENABLE_ANYHIT
+/// true (bench.wgsl's group-0 interface and entry points are frozen and
+/// trace() cannot know its caller, so any-hit is a per-module
+/// specialization; see the opt kernel's header).
+fn trace_source(shader_dir: &str, args: &Args, backend: &Backend, anyhit_module: bool) -> String {
+    let mut src = shader(shader_dir, &backend.trace_files(&args.traversal));
+    if matches!(backend, Backend::S64(_)) && args.traversal == "stackless-opt" {
+        let l = args.levers();
+        src = set_shader_flag(&src, "ENABLE_MEMO", l[0]);
+        src = set_shader_flag(&src, "ENABLE_MIRROR", l[1]);
+        src = set_shader_flag(&src, "ENABLE_SKIP", l[2]);
+        src = set_shader_flag(&src, "ENABLE_ANYHIT", anyhit_module && l[3]);
+    }
+    src
 }
 
 fn shader(dir: &str, names: &[&str]) -> String {
@@ -573,6 +649,7 @@ impl Backend {
         match self {
             Backend::Brickmap(_) => ["brickmap_trace.wgsl", "bench.wgsl"],
             Backend::S64(_) if traversal == "stackless" => ["s64_trace_stackless.wgsl", "bench.wgsl"],
+            Backend::S64(_) if traversal == "stackless-opt" => ["s64_trace_stackless_opt.wgsl", "bench.wgsl"],
             Backend::S64(_) => ["s64_trace.wgsl", "bench.wgsl"],
         }
     }
@@ -646,37 +723,50 @@ fn median(xs: &mut [f64]) -> f64 {
 /// so shader breakage is caught without touching the GPU (the benchmark
 /// machine may be mid-campaign). Exits non-zero on any error.
 fn check_shaders(shader_dir: &str) -> ! {
-    let combos: [(&str, &[&str]); 6] = [
+    let combos: [(&str, &[&str]); 7] = [
         ("brickmap-build", &["gen.wgsl", "source.wgsl", "brickmap_build.wgsl"]),
         ("scan", &["scan.wgsl"]),
         ("brickmap-trace", &["brickmap_trace.wgsl", "bench.wgsl"]),
         ("s64-build", &["gen.wgsl", "source.wgsl", "s64_build.wgsl"]),
         ("s64-trace", &["s64_trace.wgsl", "bench.wgsl"]),
         ("s64-trace-stackless", &["s64_trace_stackless.wgsl", "bench.wgsl"]),
+        ("s64-trace-stackless-opt", &["s64_trace_stackless_opt.wgsl", "bench.wgsl"]),
     ];
     let mut failed = false;
-    for (label, files) in combos {
-        let src = shader(shader_dir, files);
-        match naga::front::wgsl::parse_str(&src) {
-            Err(e) => {
-                eprintln!("{label}: PARSE ERROR\n{}", e.emit_to_string(&src));
-                failed = true;
-            }
-            Ok(module) => {
-                let mut validator = naga::valid::Validator::new(
-                    naga::valid::ValidationFlags::all(),
-                    naga::valid::Capabilities::all(),
-                );
-                match validator.validate(&module) {
-                    Err(e) => {
-                        eprintln!("{label}: VALIDATION ERROR\n{}", e.emit_to_string(&src));
-                        failed = true;
-                    }
-                    Ok(_) => eprintln!("{label}: ok"),
+    let mut validate = |label: &str, src: &str| match naga::front::wgsl::parse_str(src) {
+        Err(e) => {
+            eprintln!("{label}: PARSE ERROR\n{}", e.emit_to_string(src));
+            failed = true;
+        }
+        Ok(module) => {
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            );
+            match validator.validate(&module) {
+                Err(e) => {
+                    eprintln!("{label}: VALIDATION ERROR\n{}", e.emit_to_string(src));
+                    failed = true;
                 }
+                Ok(_) => eprintln!("{label}: ok"),
             }
         }
+    };
+    for (label, files) in combos {
+        validate(label, &shader(shader_dir, files));
     }
+    // Also validate the opt kernel with every lever const flipped from its
+    // authored default: exercises the --opt-levers string-toggle contract
+    // (set_shader_flag panics if a declaration drifted) plus the resulting
+    // source. Const values cannot change what naga validates, but the toggle
+    // path itself must not be able to break only at bench time.
+    let mut toggled = shader(shader_dir, &["s64_trace_stackless_opt.wgsl", "bench.wgsl"]);
+    for (name, v) in
+        [("ENABLE_MEMO", false), ("ENABLE_MIRROR", false), ("ENABLE_SKIP", false), ("ENABLE_ANYHIT", true)]
+    {
+        toggled = set_shader_flag(&toggled, name, v);
+    }
+    validate("s64-trace-stackless-opt[toggled]", &toggled);
     std::process::exit(if failed { 1 } else { 0 });
 }
 
@@ -711,19 +801,42 @@ fn main() {
     let backend = Backend::build(&gpu, &shader_dir, &args.backend, args.seed, &scene);
     backend.log_build();
     if args.backend == "s64" {
-        eprintln!("traversal[s64]: {}", args.traversal);
+        if args.traversal == "stackless-opt" {
+            let l = args.levers();
+            eprintln!(
+                "traversal[s64]: stackless-opt (levers: memo={} mirror={} skip={} anyhit={})",
+                l[0], l[1], l[2], l[3]
+            );
+        } else {
+            eprintln!("traversal[s64]: {}", args.traversal);
+        }
     }
 
     // --- Trace ---------------------------------------------------------------
     // Workgroup size is a tuning knob (--wg WxH): at the default 8x8 = 64
     // threads (2 warps/CTA), Ampere's 16-CTA/SM limit caps occupancy at
     // 32/48 warps = 67% before registers are even considered.
-    let trace_src = shader(&shader_dir, &backend.trace_files(&args.traversal))
-        .replace("@workgroup_size(8, 8)", &format!("@workgroup_size({}, {})", args.wg.0, args.wg.1));
+    let wg_attr = format!("@workgroup_size({}, {})", args.wg.0, args.wg.1);
+    let trace_src = trace_source(&shader_dir, &args, &backend, false).replace("@workgroup_size(8, 8)", &wg_attr);
     let trace_mod = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
     });
+    // Shadow any-hit (docs/S64OPT.md §3): the shadow pipelines come from a
+    // second module instance with ENABLE_ANYHIT=true — bench.wgsl is frozen,
+    // so the specialization is per module, not per entry point. All other
+    // pipelines (and the identity gate) use the ENABLE_ANYHIT=false module.
+    let shadow_mod_anyhit = if matches!(backend, Backend::S64(_)) && args.traversal == "stackless-opt" && args.levers()[3]
+    {
+        let src = trace_source(&shader_dir, &args, &backend, true).replace("@workgroup_size(8, 8)", &wg_attr);
+        Some(gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("trace-shadow-anyhit"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(src)),
+        }))
+    } else {
+        None
+    };
+    let shadow_mod = shadow_mod_anyhit.as_ref().unwrap_or(&trace_mod);
     let trace_pl = trace_pipeline_layout(&gpu, backend.trace_buffers().len(), true);
     let trace_pl_sec = trace_pipeline_layout(&gpu, backend.trace_buffers().len(), false);
     let p_primary = compute_pipeline_with(&gpu, &trace_mod, "primary", Some(&trace_pl));
@@ -735,7 +848,7 @@ fn main() {
     );
     let p_shadow = compute_pipeline_with(
         &gpu,
-        &trace_mod,
+        shadow_mod,
         if args.compact { "shadow_compact" } else { "shadow" },
         Some(&trace_pl_sec),
     );
@@ -880,6 +993,11 @@ fn main() {
             "shadowOccluded": stats_v[2],
         });
         backend.json_counts(&mut row);
+        if args.backend == "s64" && args.traversal == "stackless-opt" {
+            let l = args.levers();
+            row["optLevers"] =
+                serde_json::json!({ "memo": l[0], "mirror": l[1], "skip": l[2], "anyhit": l[3] });
+        }
         std::fs::write(out, serde_json::to_string_pretty(&row).unwrap()).expect("write out");
         eprintln!("wrote {out}");
     }
@@ -950,7 +1068,9 @@ struct GateRun {
 
 fn gate_primary(gpu: &Gpu, args: &Args, shader_dir: &str, backend: &Backend, bench_params: &wgpu::Buffer) -> GateRun {
     let npix = args.width as u64 * args.height as u64;
-    let trace_src = shader(shader_dir, &backend.trace_files(&args.traversal));
+    // trace_source honors --opt-levers for stackless-opt; the gate traces
+    // primary rays only, so the any-hit module split never applies here.
+    let trace_src = trace_source(shader_dir, args, backend, false);
     let trace_mod = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gate-trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
