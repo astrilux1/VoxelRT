@@ -1,5 +1,46 @@
 # Hardware-counter profiling workflow (claim-v2 core instrument)
 
+## Native path — INSTALLED AND WORKING 2026-07-19 (one user action pending)
+
+The platform decision (native wgpu, Vulkan backend) obsoletes the browser
+workarounds below for v2 work: Nsight hooks `voxelrt-native.exe` directly.
+Setup that is live on the benchmark machine:
+
+- **Nsight Systems 2026.3.1** and **Nsight Graphics 2026.2** downloaded
+  from NVIDIA (no login gate on the direct MSI URLs) and **administratively
+  extracted** (`msiexec /a`, no elevation) to `C:\Users\saege\tools\` —
+  `nsys.exe` under `nsight-systems\...\target-windows-x64\`, `ngfx.exe`
+  under `nsight-graphics\...\host\windows-desktop-nomad-x64\`.
+- **Microsoft PIX** installed via winget (D3D12 only — relevant to the
+  browser/v1 path or a future `WGPU_BACKEND=dx12` run, not the Vulkan
+  native path).
+- Nsight Graphics **Vulkan layers registered per-user** (HKCU
+  `SOFTWARE\Khronos\Vulkan\ImplicitLayers` → the GPU_Trace and nomad layer
+  JSONs in the extract's `target\windows-desktop-nomad-x64\`) — required
+  because the administrative extract skips the MSI's HKLM registration.
+- Headless capture solved: the native bench has no swapchain, so GPU Trace
+  frame triggers never fire — use **`--limit-to-submits`** (submit-based
+  boundaries). Verified: ngfx launches the app, layer engages, session
+  establishes, submits are detected.
+- **Blocked on one machine setting**: NVIDIA restricts GPU performance
+  counters to admin (`RmProfilingAdminOnly`). Either run
+  `native\profile-s64.ps1` from an **elevated** PowerShell (no driver
+  change needed), or flip once in NVIDIA Control Panel → Developer →
+  Manage GPU Performance Counters → allow all users, then reboot.
+- First assignment queued in `native\profile-s64.ps1`: per-dispatch SM
+  occupancy / local-memory traffic / warp-stall comparison of s64-stack vs
+  s64-stackless vs brickmap — the hardware confirmation of the S64
+  promotion's register-spill explanation (docs/S64.md §8.2).
+
+Unelevated `nsys` caveats on this machine: WDDM trace, CPU sampling, and
+GPU-metrics sampling are disabled without admin; timeline + Vulkan API
+trace still work once its layer question is revisited. Elevated runs get
+the full set.
+
+---
+
+## Browser path (v1 record / demo) — research below, unchanged
+
 Research round 2026-07-18 (sources at bottom). Goal: paper-grade mechanistic
 evidence — SM warp occupancy, active threads/warp, warp latency, stall
 reasons, memory throughput — per compute pass, like Lin 2026 §7.1's NSight
