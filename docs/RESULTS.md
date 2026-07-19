@@ -68,6 +68,16 @@ move-scenario equal-error extremes (0.15×, 3.35×) are interpolation through
 pose changes, not signal. The harness needs a fixed-capture-pose motion mode
 for v2.
 
+### Reference validation (2026-07-18)
+
+All 30 references behind the campaign — 6 scenario poses + 24 per-checkpoint
+motion poses — pass the frozen convergence gates (`npm run
+bench:references:checkpoints`, 1600f vs 800f): worst HDR-PSNR 44.49 dB
+(gate ≥ 30), worst channel-mean delta 0.484% (gate ≤ 0.5%, `exterior_move
+at96f` — flag for a 3200-frame extension if v2 tightens tolerances).
+Non-claim report: `test/eval/reference-convergence.json` (scratch, not
+committed); log: `test/eval/logs/refcheckpoints2-2026-07-18.log`.
+
 ### Killed hypotheses (v1)
 
 - **World-space GI reuse cache** — killed with evidence 2026-07-18 after three
