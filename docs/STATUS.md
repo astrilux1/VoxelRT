@@ -2,6 +2,94 @@
 
 ## 2026-07-01 campaign update (see docs/PLAN.md for the full plan)
 
+- **2026-07-18 v1 BASELINE CAMPAIGN COMPLETE: `ours` is at parity with `lin`,
+  not 2-3×.** Full run of PLAN §7.6 (6 scenarios × base/gi/lin/ours_unbiased/
+  ours × 9 checkpoints × 5 repeats, 1920×1080, HDR-FLIP vs frozen rb12
+  references; equal-time analysis via the new `npm run analyze`). Headline:
+  equal-FLIP speedup of ours vs lin has per-scenario medians **0.87×–1.19×**
+  and equal-time FLIP ratios 0.97×–1.02× — parity, slightly behind on
+  interior/exterior statics, ~1.18× ahead only on lamps (power-sampled light
+  list vs heterogeneous emitters). Both stacks beat `base` by 1.5–3.5× lower
+  FLIP at equal time. PLAN §4 blocker #1 (unfrozen honest ratio) is resolved
+  by measurement: frozen at parity (diagnostic seeds). Consequences: the 2-3×
+  target rests entirely on techniques not yet promoted (Phase 3 ladder, the
+  redirected initial-sampling bet) plus the §6.2-style optimization phase
+  (initial sampling is 68–72% of frame cost in both stacks; ours also pays
+  +2.2 ms/f spatial over lin). A harness↔paper methodology gap surfaced:
+  `_move` checkpoints evaluate at moving poses, making FLIP-vs-frames
+  non-monotone for every config; v2 needs a fixed-capture-pose motion mode
+  (Lin 2026 §7.4 shape). Details: docs/RESULTS.md, test/eval/analysis.md.
+- **2026-07-18 Stakeholder interview: materials become core; paper is source
+  of truth.** Two interview rounds settled the project's direction. **(1)
+  Scope:** glossy, specular, and glass are core framework features, not
+  extensions — where the codebase diverges from Lin 2026's evaluation, the
+  codebase is deficient (the estimator currently *exploits* diffuse-only:
+  restir.wgsl's reconnection shift needs no replay and footprintOK is a
+  diffuse adaptation, so this is estimator-core work, not shading polish).
+  Rollout staged glossy→mirror→glass, GGX paper-standard, each stage
+  pre-registered with evidence-boxed kill budgets (glossy 2 designs, glass 3).
+  **(2) Evidence:** two-track — the running diffuse baseline campaign closes
+  claim-v1 as a milestone record; materials open claim-manifest v2 with new
+  references and re-opened glossy-sensitive verdicts (world-GI kill,
+  footprint rows). **(3) Deliverable:** publishable-grade claim; the
+  2-3x-vs-lin target stands. **(4) Process:** living results doc started
+  (docs/RESULTS.md); GPU campaigns may run without per-run approval but with
+  alerts; hardware-counter profiling is to become a core workflow piece like
+  the paper's NSight usage — research in flight for the Chrome/Dawn/D3D12
+  toolchain (NSight Graphics vs PIX, CLI automation), with profiled runs kept
+  separate from timing runs. Scene research (paper-analog glossy/glass stress
+  scenes buildable from voxels) also in flight. PLAN §3 scope rewritten
+  accordingly; BIASMAP.md pre-registered earlier today runs against v1 first.
+
+- **2026-07-18 Process hardening (no research results in this change).**
+  Implemented the process recommendations that came out of the post-world-GI
+  review; no estimator, shader logic, or evidence changed. **(1)** New non-GPU
+  fail-closed gate `npm run check` (`test/check.mjs`), run by CI on every push
+  (`.github/workflows/check.yml`): WGSL structural sanity, RF flag-bit and
+  uniform-layout agreement between `src/main.js` and `common.wgsl`, the
+  string-replacement anchors main.js patches, bench/claim configuration
+  resolution against real presets and knobs, claim+correctness manifest
+  validation, and binding of the checked-in evidence reports to the current
+  manifest SHA-256s (a manifest edit without re-running the GPU gates now
+  fails here instead of silently orphaning evidence). **(2)** One-command
+  entry points for the next queue items, runnable only on the benchmark
+  machine: `npm run bench:baseline` (PLAN §7 item 6: locked
+  `base`/`gi`/`lin`/`ours_unbiased`/`ours` convergence campaign over all six
+  scenarios, 5 repeats) and `npm run bench:ladder` /
+  `npm run bench:ladder:confdenoise` (item 7 rung-2 direction checks; adds
+  frozen-shape `ours_mutate` — `dupmap=0&mutate=1`, measured against
+  `ours_no_dup` — and `ours_confdenoise` configs to `bench.mjs`). **(3)**
+  Pre-registration is now mandatory for flag-adding experiments:
+  `docs/EXPERIMENT_TEMPLATE.md` (hypothesis, denominator, invariants,
+  acceptance, kill condition — filled in before code, thresholds immutable
+  after the first run), referenced from RESEARCH_LOOP.md §Loop.2; WORLDGI.md
+  is the worked example. **(4)** Documentation debt paid: README's features,
+  pipeline, URL-parameter, and testing sections now describe the actual
+  unified-ReSTIR renderer and all bench commands; `VoxelBench/` is deleted
+  (self-contained, nothing outside it referenced its code, its own rnd-log
+  recorded its techniques failing review; PLAN §6.6/old handoff item 5 —
+  history remains in git). **Next action is unchanged and now one command:**
+  run `npm run bench:baseline` on the RTX 3080 machine, then drive the four
+  parked flags through the ladder (`bench:ladder`), then shrink the default
+  `ours` preset to promoted techniques only.
+- **2026-07-18 `npm run check` mutation-tested; one real gap found and closed.**
+  A fail-closed gate that has only ever been observed passing is untested, so
+  the gate was run against 17 injected faults. 16 were caught. The miss: the
+  host/shader flag contract compared only the *sorted bit values* of
+  `src/main.js RF` and `common.wgsl RF_*`, so any **permutation** of the
+  mapping passed — e.g. host `treuse: 4` against `RF_SPATIAL = 4u` leaves both
+  sorted lists identical while every preset silently enables the wrong shader
+  feature. That is the exact class of silent contract break the gate exists to
+  catch, and it would corrupt a campaign run on top of it without failing a
+  single check. `test/check.mjs` now compares the two sides **per flag**, via an
+  explicit `HOST_TO_WGSL` alias map for the three flags whose names differ
+  (`treuse`→`RF_TEMPORAL`, `sreuse`→`RF_SPATIAL`, `rclamp`→`RF_CLAMP`) and
+  `RF_<UPPERCASE>` for the rest, and additionally fails when a flag exists on
+  only one side. Re-verified: host-side, WGSL-side, and 3-cycle permutations
+  plus one-sided renames are now caught, and three benign refactors
+  (reformatting, comment rewording, whitespace realignment) still pass. No
+  estimator, shader, or evidence change; `npm test`, `bench:preflight`, and
+  `bench --suite smoke` are green on the 3080 and unaffected.
 - **2026-07-18 Phase 4 primary bet KILLED WITH EVIDENCE: world-space GI reuse
   cache does not beat screen-space reuse in this renderer.** The thesis — that
   persistent brick/face GI reservoirs survive disocclusion/camera-return better

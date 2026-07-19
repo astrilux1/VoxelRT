@@ -1,0 +1,186 @@
+# VoxelRT results (living document)
+
+Started 2026-07-18 per stakeholder decision: this document grows with the
+evidence — every campaign's tables land here with the exact commands, hardware
+context, and manifest hashes behind them, failure cases included, when they
+happen. The final claim write-up is an edit of this file, not a reconstruction.
+
+Rules of this document:
+
+- Nothing lands here without the command that produced it and the manifest
+  SHA-256 it was bound to (or an explicit "diagnostic, non-claim" label).
+- Speedups are reported as per-scenario ranges (min–median–max), never a
+  single number (Lin 2026 reports 2.08×–3.05×, not "2.6×").
+- Failure cases and killed hypotheses get sections, not footnotes.
+- Claim-v1 = diffuse-only track (frozen claim-manifest v1, closed as a
+  milestone). Claim-v2 = materials track (glossy/specular/glass, staged).
+
+---
+
+## Claim-v1 (diffuse-only track)
+
+### Hardware and runtime context
+
+RTX 3080 (Ampere), Windows 11, Chromium via Playwright, WebGPU adapter
+nvidia/ampere, fp32 accumulation, timestamp queries enabled. Full adapter
+diagnostics are recorded in each results.json.
+
+### v1 baseline convergence campaign (PLAN §7.6) — COMPLETE 2026-07-18
+
+`npm run bench:baseline` (log: `test/eval/logs/baseline-2026-07-18.log`),
+6 scenarios × 5 configs × 9 frame checkpoints × 5 repeats, 1920×1080 scale 1,
+HDR-FLIP vs frozen 1600-frame rb12 references, GPU cv typically 0.2–4%.
+Diagnostic seed budget — direction-check evidence, not claim evidence.
+Full tables: `test/eval/analysis.md` (`npm run analyze`).
+
+**Headline (equal-FLIP speedup medians, `npm run analyze` log-log
+interpolation, no extrapolation):**
+
+| pair | per-scenario median range | equal-time FLIP ratio range |
+|---|---|---|
+| **ours vs lin** | **0.87× – 1.19×** | **0.97× – 1.02×** |
+| ours vs base | 4.22× – 26.36× | 1.56× – 3.44× |
+| lin vs base | 4.40× – 27.08× | 1.51× – 3.52× |
+
+**The honest reading: `ours` is currently at parity with faithful Lin 2026 —
+not 2-3×.** The cumulative extensions cost ~2.2 ms/f more spatial-reuse time
+(9.7 vs 7.5 ms at 128f interior) and buy back roughly that much quality —
+slightly behind lin on interior/exterior static, ~1.18× ahead on the lamps
+scenes (heterogeneous emitters favor the power-sampled light list). Both
+reuse stacks beat plain PT by 1.5–3.5× lower FLIP at equal time. The 2-3×
+claim therefore currently rests entirely on *future* promoted techniques
+(Phase 3 ladder, redirected initial-sampling bet) — exactly what PLAN §4
+suspected when it listed the unfrozen ratio as blocker #1. That blocker is
+now resolved by measurement: **frozen at parity**.
+
+Per-pass GPU cost at 128f interior_static (optimization targets):
+base 12.9 ms (pathtrace 12.7); lin 31.7 (pathtrace 22.9, spatial 7.5,
+dupmap 0.7); ours 34.2 (pathtrace 23.2, spatial 9.7, dupmap 0.7). Initial
+sampling is 68–72% of frame cost in both reuse stacks.
+
+**Methodology gap exposed (fix before the claim campaign):** on `_move`
+scenarios every config — including `base` — shows non-monotone FLIP at the
+same checkpoints (e.g. interior_move 64f→96f), because each frame count
+evaluates at a *different pose*: those curves mix convergence with pose
+difficulty. Lin 2026 §7.4 instead captures a fixed view reached through
+motion. The static-scenario medians are the trustworthy claim shape; the
+move-scenario equal-error extremes (0.15×, 3.35×) are interpolation through
+pose changes, not signal. The harness needs a fixed-capture-pose motion mode
+for v2.
+
+### Reference validation (2026-07-18)
+
+All 30 references behind the campaign — 6 scenario poses + 24 per-checkpoint
+motion poses — pass the frozen convergence gates (`npm run
+bench:references:checkpoints`, 1600f vs 800f): worst HDR-PSNR 44.49 dB
+(gate ≥ 30), worst channel-mean delta 0.484% (gate ≤ 0.5%, `exterior_move
+at96f` — flag for a 3200-frame extension if v2 tightens tolerances).
+Non-claim report: `test/eval/reference-convergence.json` (scratch, not
+committed); log: `test/eval/logs/refcheckpoints2-2026-07-18.log`.
+
+### Killed hypotheses (v1)
+
+- **World-space GI reuse cache** — killed with evidence 2026-07-18 after three
+  materially different designs plus a camera-return probe; screen reuse here
+  rebuilds re-exposed regions in ~2 frames, leaving no persistence gap. Full
+  record: `docs/WORLDGI.md`, STATUS 2026-07-18. **Re-opens under claim-v2**:
+  the kill was reached in a diffuse-only renderer; glossy reuse validity is
+  view-dependent and may change the calculus.
+
+### Phase-3 ladder, rung 2 (2026-07-19) — all four candidates fail promotion
+
+`npm run bench:ladder` (32f, 3 seeds, 3 scenarios, 64f references — internal
+comparisons only). Deltas vs the `ours` control (quality = FLIP improvement,
+time = GPU ms change; promotion bar: ≥5% quality at matched time on ≥2
+scenarios, no scenario regressing >2%):
+
+| config | interior_static | lamps_static | exterior_move | verdict |
+|---|---|---|---|---|
+| ours_sigma32 | 0.0%q | −0.3%q | **−4.3%q** | **killed** (regression >2%; the earlier "repeat-stable Tier-1 signal" does not survive) |
+| ours_adaptcand | 0.0%q +0.1%t | +0.8%q +3.3%t | +0.2%q +3.1%t | **killed** (neutral quality, pays time) |
+| ours_lightgrid | 0.0%q −3.6%t | −1.3%q | 0.0%q +3.2%t | **killed** (no signal) |
+| ours_adapt_lightgrid | +12.5%t | +15.8%t | +20.7%t | **killed** (large cost, no quality) |
+| ours_mutate | =control | =control | =control | **parked**: FLIP identical to its `ours_no_dup` control to 4 decimals — not inert (dupmap pass runs, +0.9 ms), but its effect targets correlation artifacts these scenarios don't exhibit at rung-2 budgets. Missing test named: the `lamps_glossy` correlation-stress scene (SCENES.md #3). |
+
+Side finding: `ours_no_dup` shows dupmap's value is ~1% FLIP for ~3–8% GPU
+time on these scenarios — worth revisiting when the `ours` preset is
+reduced to promoted techniques (PLAN §7.8), since none of its companions
+survived.
+
+### Presented-axis rung + bias probe (2026-07-19)
+
+- **ours_confdenoise: no measurable effect on its own designed axis**
+  (denoise on, three motion scenarios: FLIP and GPU ms identical to
+  control at 4 decimals). Mechanism explains it: the modulation scales by
+  confk×(1−confidence), and at 32f confidence ≈ 1 outside transient
+  slivers. **Parked** with the missing test named: short-budget/transient
+  evaluation (2–8f post-disocclusion or the fixed-capture-pose motion
+  mode). One verification note: confirm the à-trous ping-pong parity puts
+  the final iteration in `tex.denoise[0]` (the capture's tap).
+- **Bias-map probe failed as registered and is invalid** — three named
+  causes (analysis EPS, bounce mismatch, 32f transient + firefly tail);
+  see `docs/BIASMAP.md` §7–8. The seed-averaged bias verification the
+  claim wording needs is still outstanding, pending BIASMAP v2.
+
+### Known limitations of the v1 record
+
+- Diffuse-only (Lambertian + emissive): footprint/reconnection rows
+  structurally cannot show their paper deltas (Lin 2026 Fig. 12 shows
+  near-zero delta on diffuse scenes).
+- No hardware-counter verification of *where* GPU time goes; timestamp-query
+  per-pass ms only (toolchain being selected to close this).
+- Reference bounce truncation: rb12 vs the ~+0.3% R Neumann tail recorded in
+  STATUS; a known, stated bias floor.
+
+---
+
+## Claim-v2 (materials track, native wgpu platform)
+
+### S64 traversal: PROMOTED (2026-07-18)
+
+First v2 result: sparse voxel 64-trees (TLAS/BLAS, 64-bit masks, popcount
+indexing, GPU-built) with **stackless re-descent** traversal beat the
+sparse-brickmap control at the 1024³ claim tier per the pre-registered
+criteria (`docs/S64.md`): **incoherent bounce +44.3%** (bar ≥+20%),
+primary +56.5%, shadow +8.6%, **memory 0.47×** — independently re-verified
+within 1%. The small-stack variant *failed* the same criteria (bounce
++5.6%, shadow −26.6%). **Hardware counters (Nsight GPU Trace, 2026-07-19)
+confirmed the occupancy mechanism and corrected its cause**: not register
+pressure (RF allocation ~equal across variants) but an L1-shared carveout
+for the dynamically-indexed stack (15.4% of L1, only in that variant)
+halving CTA residency, +63% instructions for stack maintenance, and
+spill-through DRAM writes; stackless additionally keeps traversal
+L1-resident (L2 at 2.3% of peak vs brickmap's 13.7%). First hardware-
+counter result of the project — the profiling workflow is live. Correctness:
+GPU builders byte-match a CPU reference on the real browser scene; the
+identity gate was re-registered (v1's absolute tolerance sat below f32 ULP
+at 1024³ distances; failure trail preserved in S64.md §7) and passes with
+1 and 22 divergent knife-edge pixels of 2.07M against a 0.005% budget.
+Caveats carried: dense-256³ coherent rays favor the brickmap ~33% (claim
+scoped to sparse/large worlds); the <50 ms build gate is unadjudicated
+until generation is staged out of the build passes.
+
+### Traversal kernel optimization log (chasing the GRay/s ceiling)
+
+Stakeholder expectation to test: "30–80 GRay/s at least" on the 3080.
+Current measured (sparse1024/fixture256, stackless S64): primary 2.9/4.1,
+bounce 0.78/1.1, shadow 2.8/6.6 GRay/s. Literature target-band research in
+flight. Measured levers so far (all gate-verified unchanged results):
+
+1. **Workgroup size** (`--wg`): 8×16 beats the 8×8 default by +4–7% on all
+   classes (64-thread CTAs cap Ampere occupancy at 67% via the 16-CTA/SM
+   limit); ≥256-thread groups regress — registers become the cap. Small
+   real win, adopted for future runs; not the missing multiplier.
+2. **Hit compaction + indirect dispatch** (`--compact`): **negative
+   result.** Bounce unchanged (dead sky threads were exiting cheaply;
+   surviving-ray divergence dominates), shadow −16% (atomic-append order
+   destroys the spatial coherence 2D dispatch gave the coherent sun rays).
+   Classic compaction-without-sorting outcome; kept behind the flag as the
+   baseline for a future *sorted* compaction experiment.
+
+### Materials rollout
+
+Opens with the glossy stage's pre-registration. Staged: GGX rough
+conductors → mirrors → dielectric glass (PLAN §3); scene specs in
+`docs/SCENES.md`. Seed-averaged bias maps (`docs/BIASMAP.md`) run against
+v1 first, then carry over as a standing v2 gate.

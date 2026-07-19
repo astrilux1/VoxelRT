@@ -22,9 +22,23 @@ terms.*
 - **Monte Carlo path tracing, 1 sample/pixel/frame**: cosine-weighted diffuse
   bounces (2 indirect bounces by default, up to 6), Russian roulette
   termination, firefly clamping.
+- **Unified ReSTIR reservoir pipeline** (after Lin, Kettunen & Wyman 2026,
+  "ReSTIR PT Enhanced"): direct and indirect light share one 32-byte reservoir
+  per pixel, resampled temporally (reprojected merge with duplication-adaptive
+  confidence caps) and spatially (paired Gaussian reuse via self-inverting
+  pairing textures, vector-valued shading weights). Every technique is
+  flag-gated behind `?preset=` / per-flag URL overrides so `base`, `gi`, `lin`
+  and `ours` estimators can be benchmarked against each other — see
+  `docs/PLAN.md` for the research program this serves.
+- **Voxel-native reuse extensions** (the `ours` preset): voxel-exact receiver
+  plane reconstruction and same-plane neighbor validation, disocclusion
+  history rescue, per-candidate visibility at shading, contribution clamping,
+  and power-sampled emissive light lists.
 - **Direct light via next-event estimation**: the sun is sampled as a cone
   (soft shadows) at every path vertex; the sun disc is excluded from
-  secondary-ray sky hits so it is never double counted.
+  secondary-ray sky hits so it is never double counted. Every exposed face of
+  an emissive voxel is a sampleable area light (with a power-sampling alias
+  table), so heterogeneous emitters converge cleanly.
 - **Emissive voxels**: any voxel can be an area light (the Cornell room's
   ceiling panel and the colored lanterns in the demo scene), picked up by path
   vertices for local GI.
@@ -71,19 +85,42 @@ or Firefox/Safari with WebGPU enabled).
 `?grid=128` world size (voxels per axis, default 256) · `?scale=0.5` internal
 render scale · `?bounces=3` indirect bounces · `?denoise=0` / `?temporal=0`
 disable passes · `?px=&py=&pz=&yaw=&pitch=` camera pose ·
-`?nocanvas=1` render offscreen only (headless testing).
+`?nocanvas=1` render offscreen only (headless testing) ·
+`?scene=lamps` heterogeneous-emitter scene variant.
+
+Estimator selection: `?preset=base|gi|lin|ours|ours_motion` picks a flag set
+(see `PRESETS` in `src/main.js`); any individual flag can be forced with
+`?<flag>=0/1` (e.g. `?paired=0`, `?dupmap=0`, `?worldgi=1`). Tuning knobs:
+`?taps= sigma= radius= ccap= capmin= dupalpha= fpc= rclampv= maxhist= fclamp=
+sigma2= candscale= confk= mutscale= gridcand= wgicap=`. Deterministic bench
+hooks: `?benchmove=` (frame-indexed strafe), `?stopat=`, `?fseed=`,
+`?timing=1` (per-pass GPU timestamps).
 
 ## Frame pipeline
 
 ```
-pathtrace.wgsl   compute 8×8   1 spp: primary ray + N GI bounces through the
-                               voxel DDA, sun NEE at every vertex.
-                               → demodulated radiance, albedo, G-buffer (normal+depth)
-temporal.wgsl    compute 8×8   camera reprojection, depth/normal validation,
-                               exponential accumulation (α = 1/history)
-atrous.wgsl      compute 8×8   ×3 edge-aware wavelet iterations (steps 1,2,4)
-present.wgsl     render        remodulate albedo, exposure, ACES, gamma
+pathtrace.wgsl       compute 8×8  primary hit, G-buffer, initial reservoir
+                                  candidates: sun-cone NEE + emissive
+                                  light-list NEE + BSDF bounce path, one
+                                  unified reservoir per pixel
+reuse_temporal.wgsl  compute 8×8  reprojected reservoir merge,
+                                  duplication-adaptive cCap, 3×3
+                                  disocclusion history rescue
+reuse_spatial.wgsl   compute 8×8  paired Gaussian spatial reuse,
+                                  confidence-weighted balance-heuristic MIS,
+                                  vector shading weights, per-candidate
+                                  visibility; writes shaded radiance +
+                                  next frame's reservoir history
+dupmap.wgsl          compute 8×8  9×9 sample-duplication map from reservoir
+                                  seeds, feeds next frame's adaptive cCap
+temporal.wgsl        compute 8×8  camera reprojection, depth/normal
+                                  validation, exponential accumulation
+atrous.wgsl          compute 8×8  ×3 edge-aware wavelet iterations (1,2,4)
+present.wgsl         render       remodulate albedo, exposure, ACES, gamma
 ```
+
+With `?preset=base` the reuse and dupmap passes are skipped and the renderer
+is a plain 1-spp path tracer with temporal accumulation and denoising.
 
 The voxel world lives in a storage buffer (one packed `u32` per voxel:
 RGB albedo + emissive intensity) plus a brick-occupancy buffer
@@ -98,10 +135,31 @@ composited in headless mode) and fails on a blank image:
 
 ```sh
 npm install
+npm run check                  # non-GPU gate: shader/host contracts, manifests
 npm test                       # writes test/screenshot.png
 npm run bench                  # short 1920x1080 HDR benchmark smoke
 npm run bench:ablation         # 1920x1080 paper-style ablation harness
 npm run bench:convergence      # convergence curves over fixed frame budgets
+```
+
+`npm run check` needs no GPU and runs in CI on every push (see
+`.github/workflows/check.yml`): WGSL structural sanity, host/shader flag and
+uniform-layout agreement, benchmark/claim configuration resolution, manifest
+validation, and evidence-to-manifest hash binding.
+
+The research campaign entry points (RTX 3080 benchmark machine only — they
+fail closed elsewhere; see `docs/PLAN.md` §5 and `docs/RESEARCH_LOOP.md`):
+
+```sh
+npm run bench:preflight        # verify the locked adapter/runtime contract
+npm run bench:references       # build + validate frozen HDR references
+npm run bench:correctness      # unbiased estimator convergence gate
+npm run bench:baseline         # Phase 2 locked baseline campaign:
+                               #   base/gi/lin/ours_unbiased/ours convergence
+                               #   curves over all six claim scenarios
+npm run bench:ladder           # Phase 3 direction check for parked flags
+                               #   (sigma=32, adaptcand, lightgrid, mutate)
+npm run bench:ladder:confdenoise  # presented-axis check, denoiser on
 ```
 
 Benchmark runs write `test/eval/results.json`, `results.csv`, and

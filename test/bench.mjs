@@ -106,6 +106,11 @@ const framesDefault = parseInt(arg('--frames', correctnessMode
 const repeats = parseInt(arg('--repeats', suite === 'smoke' ? '1' : '3'), 10);
 const wantFlip = claimMode || flag('--flip') || suite === 'paper';
 const forceRefs = flag('--force-refs');
+// --validate-refs only checks each scenario at its own referenceFrame. A moving
+// scenario is evaluated at a *different pose* for every frame checkpoint, so
+// each checkpoint has its own reference and none of them are convergence-tested
+// by default. This extends the sweep to every evaluation checkpoint.
+const validateRefCheckpoints = flag('--validate-ref-checkpoints');
 const refsOnly = flag('--refs');
 const allowSoftwareGpu = flag('--allow-software-gpu');
 const allowNonNvidiaGpu = flag('--allow-non-nvidia-gpu');
@@ -188,6 +193,11 @@ const BASE_CONFIGS = {
   ours_mixsigma32: 'preset=ours&mixsigma=1&sigma2=32&fclamp=0',
   ours_mixsigma48: 'preset=ours&mixsigma=1&sigma2=48&fclamp=0',
   ours_mixsigma: 'preset=ours&mixsigma=1&fclamp=0',
+  // Phase 3 ladder rows (docs/PLAN.md §6): mutate's case is replacing the
+  // dupmap's intentional cCap bias, so it runs against the no-dupmap variant;
+  // confdenoise is presented-axis only and must be run with --denoise 1.
+  ours_mutate: 'preset=ours&dupmap=0&mutate=1&fclamp=0',
+  ours_confdenoise: 'preset=ours&confdenoise=1&fclamp=0',
   gi_histisolate: 'preset=gi&histisolate=1&maxhist=1000000&fclamp=0',
   unified_histisolate: 'preset=gi&unified=1&histisolate=1&maxhist=1000000&fclamp=0',
   lin_histisolate: 'preset=lin&dupmap=0&footprint=0&histisolate=1&maxhist=1000000&fclamp=0',
@@ -704,7 +714,12 @@ async function validateReferenceSet() {
   for (const name of scenarioNames) {
     const scen = SCENARIOS[name];
     if (!scen) throw new Error(`unknown scenario ${name}`);
-    const evaluationFrame = scen.referenceFrame;
+    // Static scenarios hold one pose, so every checkpoint resolves to the same
+    // reference; only moving scenarios have a per-checkpoint reference to test.
+    const evaluationFrames = (validateRefCheckpoints && scen.move)
+      ? manifest.evaluation.frameCheckpoints
+      : [scen.referenceFrame];
+    for (const evaluationFrame of evaluationFrames) {
     const low = await reference(name, scen, lowFrames, evaluationFrame);
     const high = await reference(name, scen, highFrames, evaluationFrame);
     const primaryMetrics = await score(low.f32, high.f32, view.width, view.height);
@@ -730,7 +745,9 @@ async function validateReferenceSet() {
     }
     rows.push(row);
     const pct = (primary.maxChannelMeanRelativeDelta * 100).toFixed(3);
-    console.log(`reference ${name}: ${row.status} | max mean delta ${pct}% | HDR PSNR ${primary.hdrPsnrPeakDb.toFixed(2)} dB`);
+    const at = scen.move ? ` at${evaluationFrame}f` : '';
+    console.log(`reference ${name}${at}: ${row.status} | max mean delta ${pct}% | HDR PSNR ${primary.hdrPsnrPeakDb.toFixed(2)} dB`);
+    }
   }
   const report = {
     claimManifest: manifestIdentity,
