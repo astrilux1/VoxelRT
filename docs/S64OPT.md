@@ -38,7 +38,35 @@ primary/bounce paths; shadow validated by exact occlusion-count equality
 vs the control on both scenes (same rays, boolean result); determinism
 unchanged.
 
-## 4. Cost budget
+Implementation notes (appended 2026-07-19, implementation pass; §1–6
+registered text above unchanged): landed in
+`native/shaders/s64_trace_stackless_opt.wgsl` behind per-lever consts
+(`ENABLE_MEMO` / `ENABLE_MIRROR` / `ENABLE_SKIP` / `ENABLE_ANYHIT`),
+selected via `--traversal stackless-opt`; `--opt-levers
+<memo,mirror,skip,anyhit|none>` string-toggles the consts (absent = all
+on). The promoted control kernel is untouched. Mirroring reflects through
+the ORIGIN (x → −x, world interval [−1024, 0) on mirrored axes) rather
+than through GRID: IEEE negation is exact, so all t arithmetic is
+bitwise-identical to the control (a GRID − x transform was measured on the
+CPU ports at ~0.1% knife-edge divergence from transform rounding and was
+rejected). Skip-coalescing advances tMax by serial additions, so committed
+jumps are bitwise-identical to per-cell stepping. `trace_occluded()`
+shape: bench.wgsl's group-0 interface and entry-point set are frozen and
+`trace()` cannot know its caller, so any-hit is a per-MODULE
+specialization instead — the host compiles a second module with
+`ENABLE_ANYHIT=true` and builds only the shadow/shadow_compact pipelines
+from it; `trace()` then skips the material fetch and normal bookkeeping
+(t, and therefore the occlusion boolean and counts, unchanged). CPU
+cross-check (`cargo test`, native/src/verify.rs): a deterministic
+12,468-ray bundle (axis-aligned / diagonal / grazing / random /
+short-maxT) through 1:1 Rust ports asserts bitwise (t, voxel, material,
+normal) equality vs the control port for memo / skip / anyhit
+(individually and combined) with lever-engagement counters, gate-v2
+tolerance with 0 observed divergences for mirror, and anchors the control
+port against an independent f64 voxel-march oracle (0 divergences);
+row-mask emptiness, mirrored bit indexing and memo containment are
+property-tested. GPU measurement, occupancy check (§4) and the gates
+remain queued.
 
 No new buffers; register budget must stay ≤ current (verify occupancy via
 GPU Trace before/after). Implementation: one design pass, no variant
@@ -65,8 +93,48 @@ re-registration.
 
 ## 7. Results
 
-Not yet run.
+Measured 2026-07-19 (RTX 3080, sparse1024, `--wg 8x16`, 3 warm interleaved
+rounds; ms primary/bounce/shadow, control = promoted stackless):
+
+| config | primary | bounce | shadow | verdict (§5.2: ≥+10% on ≥2 classes) |
+|---|---|---|---|---|
+| control | 0.751 | 1.232 | 0.345 | — |
+| opt[none] anchor | 0.735 | 1.228 | 0.348 | ≈control ✓ (harness sane) |
+| memo | 0.827 | 1.390 | 0.378 | **dropped: −10% everywhere** |
+| mirror | 0.828 | 1.434 | 0.419 | **dropped: −11…−21%** |
+| skip | 1.014 | 1.914 | 0.496 | **dropped: −35…−55%** |
+| anyhit | 0.735 | 1.227 | 0.348 | **dropped: neutral (<+5%)** |
+| all four | 1.363 | 2.539 | 0.623 | compounding losses, ~2× slower |
+
+Correctness held throughout: identity gate v2 passed on both scenes (1 and
+22 divergent pixels, unchanged), shadow occlusion counts byte-equal to
+control, all-lever CPU cross-checks bitwise-clean. The implementations are
+faithful; the *hypotheses* failed on this kernel/hardware/scene:
+
+- Memoization: the promoted kernel's root re-descent is ≤4 mask reads from
+  a 16.9 KB cache-resident TLAS; the memo branch adds ~8 live registers
+  and containment tests that cost more than the reads they save.
+- Mirroring: the removed per-axis sign-selects were already cheap
+  (uniform-per-ray branches); the added coordinate transforms were not.
+- Skip-coalescing: the row test executes every inner iteration; empty
+  rows along the dominant axis are too rare at sparse1024 leaf occupancy
+  to amortize it.
+- Any-hit: shadow rays here terminate in ~1–3 steps and fetch one
+  material per ray — there was nothing material to skip.
+
+The source guide's multipliers (~2× memoization, +21% skip) were measured
+on an integrated GPU with a far smaller cache and different
+compute/bandwidth ratio — lever multipliers are platform-contingent, and
+this rung is the measured proof for the discrete-GPU case.
 
 ## 8. Terminal state and redirect
 
-Pre-registered 2026-07-19; queued behind the v1 bias-map runs.
+**Closed 2026-07-19: all levers killed per §6; the promoted stackless
+kernel stands unmodified.** The opt kernel and its CPU cross-check suite
+stay in-tree as measurement infrastructure (and as the worked example that
+faithful implementations of published optimizations can be honest
+negatives). Redirect: per docs/THROUGHPUT.md the remaining credible
+traversal levers are ray *reordering* for bounce rays (1.3–2×, requires a
+sort — the unsorted compaction negative already bounds the no-sort case)
+and LOD/mip-DDA for distant rays (quality-gated, not identity-gated). Both
+are claim-v2-scale experiments, not micro-opts.

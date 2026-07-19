@@ -48,7 +48,8 @@ Scale-free metric to report alongside rays/s: **Gsteps/s**
 1. **Ray reordering/sorting for bounce rays**: 1.3–2.0× (Meister et al.) —
    our unsorted compaction already measured neutral-to-negative, consistent
    with the literature: the win requires the *sort*.
-2. **Ancestor-node memoization in stackless re-descent**: ~2× claimed in
+2. ~~Ancestor memoization / mirroring / skip-coalescing~~ **MEASURED 2026-07-19: all negative on the 3080** (docs/S64OPT.md §7) — the source guide's multipliers came from an integrated GPU; on a discrete card with a cache-resident TLAS the levers cost more than they save. Remaining credible levers: reordering (1) and LOD (3).
+2. (superseded) **Ancestor-node memoization in stackless re-descent**: ~2× claimed in
    the S64-origin guide — our stackless kernel re-descends from the TLAS
    root every relocation, no memoization: **the largest unimplemented
    lever**. Bitmask skip-coalescing (+21%) and ray-octant mirroring (+10%)

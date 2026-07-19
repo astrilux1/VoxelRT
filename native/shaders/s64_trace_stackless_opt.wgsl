@@ -21,15 +21,21 @@
 //     root re-descent would read (the structure is static), so only the
 //     number of mask/node reads changes, never a traversal decision.
 //
-//   ENABLE_MIRROR ("mirror") — ray-octant mirroring: reflect the ray into
-//     the all-non-negative direction octant (x -> GRID - x on each negative
-//     axis) and run the whole traversal in mirrored space; mask bits are
-//     indexed with un-mirrored cell coordinates (bit = x + y*4 + z*16 with
-//     cell -> 3 - cell on mirrored axes; chunkRoots with chunk -> 15 -
-//     chunk), and the hit normal is un-mirrored on output. NOT bitwise-exact
-//     vs the control: the mirror transform (GRID - ro) rounds, so t can
-//     differ by ULPs and knife-edge rays may resolve to a neighboring
-//     face/cell — the class identity gate v2's divergence budget covers.
+//   ENABLE_MIRROR ("mirror") — ray-octant mirroring: reflect each
+//     negative-direction axis through the ORIGIN (x -> -x, so the world
+//     interval becomes [-GRID, 0) on mirrored axes) and run the whole
+//     traversal in mirrored space with an all-non-negative direction; mask
+//     bits are indexed with un-mirrored cell coordinates (bit = x + y*4 +
+//     z*16 with cell -> 3 - cell on mirrored axes; chunkRoots with chunk ->
+//     -1 - chunk), and the hit normal is un-mirrored on output. Reflection
+//     through the origin — not through GRID — is chosen because IEEE
+//     negation is EXACT: every ray-parameter (t) value below is
+//     bitwise-identical to the control's (plane - ro and (plane - ro) *
+//     invRd negate exactly), so mirroring cannot move a hit. The only
+//     representable divergence is a float position landing exactly on a
+//     cell boundary (floor(-w) = -floor(w) - 1 fails only for integral w),
+//     where the relocation clamp confines the difference to a tie-break;
+//     the identity gate v2 divergence budget covers that measure-zero set.
 //
 //   ENABLE_SKIP   ("skip") — bitmask skip-coalescing: when the 4-bit row of
 //     the current node's 64-bit mask along the ray's dominant axis is empty
@@ -146,14 +152,19 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
   // --- Lever 2: octant mirroring. With ENABLE_MIRROR off, mir is all-false,
   // every select below is the identity and the kernel runs the control's
   // exact arithmetic on (ro, rd). With it on, negative-direction axes are
-  // reflected (x -> GRID - x) so the transformed direction is non-negative
-  // on every axis; the traversal below is the unchanged control code
-  // operating on the transformed ray, plus un-mirroring at mask indexing
-  // (cell_bit / chunkRoots) and at the normal output.
+  // reflected through the origin (x -> -x; the grid becomes [-GRID, 0) on
+  // those axes) so the transformed direction is non-negative on every axis;
+  // the traversal below is the unchanged control code operating on the
+  // transformed ray and grid box, plus un-mirroring at mask indexing
+  // (cell_bit / chunkRoots) and at the normal output. Negation is exact in
+  // IEEE f32, so all t arithmetic stays bitwise-identical to the control.
   var mir = vec3<bool>(false);
   if (ENABLE_MIRROR) { mir = rd < vec3<f32>(0.0); }
-  let ro = select(ro0, vec3<f32>(f32(GRID_T)) - ro0, mir);
+  let ro = select(ro0, -ro0, mir);
   let rdT = select(rd, -rd, mir);
+  // Grid box in traversal space: [glo, ghi) = [0, GRID) or [-GRID, 0).
+  let gloI = select(vec3<i32>(0), vec3<i32>(-GRID_T), mir);
+  let ghiI = gloI + vec3<i32>(GRID_T);
 
   let invRd = safeInv(rdT);
   let stepDir = vec3<i32>(sign(rdT));
@@ -164,9 +175,11 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
   // + in traversal space but - in world space).
   let stepOut = select(stepF, -stepF, mir);
 
-  // World clip: identical to the control (identity invariant 1).
-  let t0 = (vec3<f32>(0.0) - ro) * invRd;
-  let t1 = (vec3<f32>(f32(GRID_T)) - ro) * invRd;
+  // World clip: identical to the control (identity invariant 1); the plane
+  // pair per axis is [glo, ghi] instead of [0, GRID], which under mirroring
+  // is the exact negation of the control's pair.
+  let t0 = (vec3<f32>(gloI) - ro) * invRd;
+  let t1 = (vec3<f32>(ghiI) - ro) * invRd;
   let tmin3 = min(t0, t1);
   let tmax3 = max(t0, t1);
   let tEnter = max(max(tmin3.x, tmin3.y), max(tmin3.z, 0.0));
@@ -182,7 +195,7 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
   var t = tEnter;
   // Entry voxel: same +1e-4 entry nudge and clamp as the control.
   var vox = clamp(vec3<i32>(floor(ro + rdT * (t + 1e-4))),
-                  vec3<i32>(0), vec3<i32>(GRID_T - 1));
+                  gloI, ghiI - vec3<i32>(1));
 
   // --- Lever 3 setup: dominant axis (largest |direction| component; x wins
   // ties over y over z). Fixed per ray.
@@ -215,7 +228,7 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
     // TLAS root (control behavior).
     var level : i32 = 0;
     var sh : u32 = 8u;                 // cell size = 1 << sh: 256/64/16/4/1
-    var origin = vec3<i32>(0);
+    var origin = gloI;
     var mask = vec2<u32>(tlas[0], tlas[1]);
     var base : u32 = 0u;               // level 2: L1 node base; 3: leaf base;
                                        // 4: matBase — only read at 2..4
@@ -255,7 +268,7 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
         // being set guarantees a valid reference. The table is indexed by
         // un-mirrored global chunk coordinates.
         let ccm = corg >> vec3<u32>(6u);
-        let cc = select(ccm, vec3<i32>(15) - ccm, mir);
+        let cc = select(ccm, vec3<i32>(-1) - ccm, mir);
         let n = nodes[tlas[130u + u32(cc.x + cc.y * 16 + cc.z * 256)]];
         mask = n.xy;
         base = n.z;
@@ -341,7 +354,7 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
                           cellBase, cellBase + vec3<i32>(cs - 1));
       let crossing = select(cellBase + vec3<i32>(cs - 1), cellBase, stepPos);
       vox = select(clamped, crossing, amask > vec3<f32>(0.5));
-      if (any(vox < vec3<i32>(0)) || any(vox >= vec3<i32>(GRID_T))) {
+      if (any(vox < gloI) || any(vox >= ghiI)) {
         return hit;                    // left the world grid
       }
       break;                           // outer loop re-descends at vox
