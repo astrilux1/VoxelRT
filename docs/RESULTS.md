@@ -99,10 +99,29 @@ committed); log: `test/eval/logs/refcheckpoints2-2026-07-18.log`.
 
 ---
 
-## Claim-v2 (materials track)
+## Claim-v2 (materials track, native wgpu platform)
 
-Opens when the glossy stage's pre-registration lands. Staged rollout: GGX
-rough conductors → smooth specular mirrors → dielectric glass (PLAN §3).
-Scene specs for glossy/specular/glass stress scenarios: pending the scene
-research round. Seed-averaged bias maps (`docs/BIASMAP.md`) run against v1
-first, then carry over as a standing v2 gate.
+### S64 traversal: PROMOTED (2026-07-18)
+
+First v2 result: sparse voxel 64-trees (TLAS/BLAS, 64-bit masks, popcount
+indexing, GPU-built) with **stackless re-descent** traversal beat the
+sparse-brickmap control at the 1024³ claim tier per the pre-registered
+criteria (`docs/S64.md`): **incoherent bounce +44.3%** (bar ≥+20%),
+primary +56.5%, shadow +8.6%, **memory 0.47×** — independently re-verified
+within 1%. The small-stack variant *failed* the same criteria (bounce
++5.6%, shadow −26.6%): the win is register residency, not tree shape —
+worth a hardware-counter confirmation before the writeup. Correctness:
+GPU builders byte-match a CPU reference on the real browser scene; the
+identity gate was re-registered (v1's absolute tolerance sat below f32 ULP
+at 1024³ distances; failure trail preserved in S64.md §7) and passes with
+1 and 22 divergent knife-edge pixels of 2.07M against a 0.005% budget.
+Caveats carried: dense-256³ coherent rays favor the brickmap ~33% (claim
+scoped to sparse/large worlds); the <50 ms build gate is unadjudicated
+until generation is staged out of the build passes.
+
+### Materials rollout
+
+Opens with the glossy stage's pre-registration. Staged: GGX rough
+conductors → mirrors → dielectric glass (PLAN §3); scene specs in
+`docs/SCENES.md`. Seed-averaged bias maps (`docs/BIASMAP.md`) run against
+v1 first, then carry over as a standing v2 gate.

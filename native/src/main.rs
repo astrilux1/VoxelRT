@@ -20,6 +20,10 @@ const NUM_BRICKS: u64 = (BGRID as u64) * (BGRID as u64) * (BGRID as u64);
 
 struct Args {
     backend: String,
+    /// s64 traversal variant (docs/S64.md §4 budget): "stack" = variant 1
+    /// (small-stack descent, s64_trace.wgsl), "stackless" = variant 2
+    /// (stackless re-descent, s64_trace_stackless.wgsl). Ignored by brickmap.
+    traversal: String,
     scene: String,
     width: u32,
     height: u32,
@@ -34,6 +38,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut a = Args {
         backend: "brickmap".into(),
+        traversal: "stack".into(),
         scene: "sparse1024".into(),
         width: 1920,
         height: 1080,
@@ -68,6 +73,13 @@ fn parse_args() -> Args {
         });
         match k.as_str() {
             "--backend" => a.backend = v,
+            "--traversal" => {
+                if v != "stack" && v != "stackless" {
+                    eprintln!("unknown traversal {v} (expected stack or stackless)");
+                    std::process::exit(2);
+                }
+                a.traversal = v;
+            }
             "--scene" => a.scene = v,
             "--frames" => a.frames = v.parse().expect("frames"),
             "--seed" => a.seed = v.parse().expect("seed"),
@@ -524,9 +536,12 @@ impl Backend {
         }
     }
     /// Shader files concatenated ahead of bench.wgsl to provide trace().
-    fn trace_files(&self) -> [&'static str; 2] {
+    /// `traversal` selects the s64 variant (docs/S64.md §4: "stack" =
+    /// small-stack descent, "stackless" = stackless re-descent).
+    fn trace_files(&self, traversal: &str) -> [&'static str; 2] {
         match self {
             Backend::Brickmap(_) => ["brickmap_trace.wgsl", "bench.wgsl"],
+            Backend::S64(_) if traversal == "stackless" => ["s64_trace_stackless.wgsl", "bench.wgsl"],
             Backend::S64(_) => ["s64_trace.wgsl", "bench.wgsl"],
         }
     }
@@ -600,12 +615,13 @@ fn median(xs: &mut [f64]) -> f64 {
 /// so shader breakage is caught without touching the GPU (the benchmark
 /// machine may be mid-campaign). Exits non-zero on any error.
 fn check_shaders(shader_dir: &str) -> ! {
-    let combos: [(&str, &[&str]); 5] = [
+    let combos: [(&str, &[&str]); 6] = [
         ("brickmap-build", &["gen.wgsl", "source.wgsl", "brickmap_build.wgsl"]),
         ("scan", &["scan.wgsl"]),
         ("brickmap-trace", &["brickmap_trace.wgsl", "bench.wgsl"]),
         ("s64-build", &["gen.wgsl", "source.wgsl", "s64_build.wgsl"]),
         ("s64-trace", &["s64_trace.wgsl", "bench.wgsl"]),
+        ("s64-trace-stackless", &["s64_trace_stackless.wgsl", "bench.wgsl"]),
     ];
     let mut failed = false;
     for (label, files) in combos {
@@ -663,9 +679,12 @@ fn main() {
     // --- Build ---------------------------------------------------------------
     let backend = Backend::build(&gpu, &shader_dir, &args.backend, args.seed, &scene);
     backend.log_build();
+    if args.backend == "s64" {
+        eprintln!("traversal[s64]: {}", args.traversal);
+    }
 
     // --- Trace ---------------------------------------------------------------
-    let trace_src = shader(&shader_dir, &backend.trace_files());
+    let trace_src = shader(&shader_dir, &backend.trace_files(&args.traversal));
     let trace_mod = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
@@ -764,6 +783,7 @@ fn main() {
     if let Some(out) = &args.out {
         let mut row = serde_json::json!({
             "backend": args.backend,
+            "traversal": if args.backend == "s64" { args.traversal.as_str() } else { "-" },
             "scene": args.scene,
             "seed": args.seed,
             "resolution": format!("{}x{}", args.width, args.height),
@@ -847,7 +867,7 @@ struct GateRun {
 
 fn gate_primary(gpu: &Gpu, args: &Args, shader_dir: &str, backend: &Backend, bench_params: &wgpu::Buffer) -> GateRun {
     let npix = args.width as u64 * args.height as u64;
-    let trace_src = shader(shader_dir, &backend.trace_files());
+    let trace_src = shader(shader_dir, &backend.trace_files(&args.traversal));
     let trace_mod = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gate-trace"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(trace_src)),
@@ -910,6 +930,7 @@ fn run_gate(gpu: &Gpu, args: &Args, shader_dir: &str, scene: &SceneSource) -> ! 
     for b in &backends {
         b.log_build();
     }
+    eprintln!("gate s64 traversal: {}", args.traversal);
 
     let ub = bench_uniform(args);
     let bench_params =
