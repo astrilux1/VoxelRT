@@ -1,6 +1,7 @@
 // GPU build of the sparse brickmap: 1024^3 world, 8^3 bricks, 128^3 pointer
-// grid. Three passes over the pure voxel_material() function from gen.wgsl
-// (concatenated ahead of this file by the host):
+// grid. Three passes over the pure voxel_fetch() source switch from
+// source.wgsl (the host concatenates gen.wgsl + source.wgsl ahead of this
+// file):
 //
 //   pass_occupancy: one workgroup per brick (8^3 = 512 threads), workgroup-OR
 //     of voxel occupancy -> brickOccupied[bi] = 0/1 count word
@@ -17,7 +18,7 @@ const BGRID : u32 = 128u;   // GRID / BRICK
 struct GenParams {
   seed : u32,
   gridShift : u32,   // log2(GRID) - unused hook for other grid sizes
-  _pad0 : u32,
+  sourceMode : u32,  // 0 = procedural voxel_material, 1 = srcVoxels buffer
   _pad1 : u32,
 };
 
@@ -37,7 +38,7 @@ fn pass_occupancy(@builtin(workgroup_id) wid : vec3<u32>,
   if (li == 0u) { atomicStore(&wg_any, 0u); }
   workgroupBarrier();
   let p = wid * BRICK + lid;
-  if (voxel_material(p, gp.seed) != 0u) { atomicOr(&wg_any, 1u); }
+  if (voxel_fetch(p, gp.seed, gp.sourceMode) != 0u) { atomicOr(&wg_any, 1u); }
   workgroupBarrier();
   if (li == 0u) {
     let bi = wid.x + wid.y * BGRID + wid.z * BGRID * BGRID;
@@ -61,7 +62,7 @@ fn pass_fill(@builtin(workgroup_id) wid : vec3<u32>,
     // li == lid.x + lid.y*8 + lid.z*64 (WGSL local_invocation_index layout),
     // i.e. exactly the linear voxel index brickVoxelOccupied() expects for
     // both the mask bit and the material slot.
-    let m = voxel_material(wid * BRICK + lid, gp.seed);
+    let m = voxel_fetch(wid * BRICK + lid, gp.seed, gp.sourceMode);
     if (m != 0u) { atomicOr(&wg_mask[li >> 5u], 1u << (li & 31u)); }
     brickMats[slot * 512u + li] = m;
   }

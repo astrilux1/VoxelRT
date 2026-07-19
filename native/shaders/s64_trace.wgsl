@@ -80,7 +80,8 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
 
   // Per-level stack, depth 5 (levels 0..4; cell size 256/64/16/4/1 voxels).
   var stMask : array<vec2<u32>, 5>;    // 64-bit occupancy mask of the node
-  var stBase : array<u32, 5>;          // childBase (level 4: matBase)
+  var stBase : array<u32, 5>;          // childBase (level 4: matBase); only
+                                       // levels 2..4 are ever read
   var stOrigin : array<vec3<i32>, 5>;  // node min corner, voxel coords
   var stCell : array<vec3<i32>, 5>;    // parent DDA state saved on descend
   var stTMax : array<vec3<f32>, 5>;
@@ -89,7 +90,6 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
   var cs : i32 = 256;                  // cell size at current level
   var t = tEnter;
   stMask[0] = vec2<u32>(tlas[0], tlas[1]);
-  stBase[0] = 0u;
   stOrigin[0] = vec3<i32>(0);
 
   // Enter level 0 (clamped, like brickmap's brick entry).
@@ -121,7 +121,6 @@ fn trace(roWorld : vec3<f32>, rd : vec3<f32>, maxTWorld : f32) -> Hit {
       if (level == 0) {
         // TLAS root cell -> chunk-group mask.
         stMask[1] = vec2<u32>(tlas[2u + bit * 2u], tlas[3u + bit * 2u]);
-        stBase[1] = 0u;
       } else if (level == 1) {
         // Group cell -> chunk root node via the chunkRoots table; the bit
         // being set guarantees a valid reference.

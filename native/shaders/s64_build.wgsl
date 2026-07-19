@@ -1,7 +1,7 @@
 // GPU build of the sparse voxel 64-tree (docs/S64.md §3). The host
-// concatenates gen.wgsl ahead of this file, so the same pure
-// voxel_material() feeds both backends (that is what makes the identity
-// gate meaningful).
+// concatenates gen.wgsl + source.wgsl ahead of this file, so the same pure
+// voxel_fetch() source (procedural or fixture buffer) feeds both backends
+// (that is what makes the identity gate meaningful).
 //
 // Layout produced (bit index inside any 4^3 tile is x + y*4 + z*16):
 //   tlas[0..2)      TLAS root: 64-bit mask over 4^3 chunk-groups (256^3 vox)
@@ -39,7 +39,7 @@
 //     pass_leaf_fill           256^3 wg(4,4,4)     leaves[], mats[]
 //
 // Leaf masks are not stored densely (256^3 x 8 B = 134 MB); pass_leaf_fill
-// re-evaluates voxel_material instead, exactly like brickmap's pass_fill.
+// re-evaluates voxel_fetch instead, exactly like brickmap's pass_fill.
 
 const NONE_S64 : u32 = 0xffffffffu;
 const LGRID_B : u32 = 256u;   // leaf grid: 1024 / 4
@@ -49,7 +49,7 @@ const CGRID_B : u32 = 16u;    // chunk grid: 1024 / 64
 struct S64Params {
   seed : u32,
   numRoots : u32,   // valid in phase B only (host writes it after the scans)
-  _p0 : u32,
+  sourceMode : u32, // 0 = procedural voxel_material, 1 = srcVoxels buffer
   _p1 : u32,
 };
 
@@ -91,7 +91,7 @@ fn pass_leaf_count(@builtin(workgroup_id) wid : vec3<u32>,
   if (li < 2u) { atomicStore(&wg_mask[li], 0u); }
   workgroupBarrier();
   let p = wid * 4u + lid;
-  if (voxel_material(p, sp.seed) != 0u) {
+  if (voxel_fetch(p, sp.seed, sp.sourceMode) != 0u) {
     atomicOr(&wg_mask[li >> 5u], 1u << (li & 31u));
   }
   workgroupBarrier();
@@ -242,7 +242,7 @@ fn pass_leaf_fill(@builtin(workgroup_id) wid : vec3<u32>,
   if (li < 2u) { atomicStore(&wg_mask[li], 0u); }
   workgroupBarrier();
   let p = wid * 4u + lid;
-  let m = voxel_material(p, sp.seed);
+  let m = voxel_fetch(p, sp.seed, sp.sourceMode);
   if (m != 0u) { atomicOr(&wg_mask[li >> 5u], 1u << (li & 31u)); }
   workgroupBarrier();
   let mask = vec2<u32>(atomicLoad(&wg_mask[0]), atomicLoad(&wg_mask[1]));
